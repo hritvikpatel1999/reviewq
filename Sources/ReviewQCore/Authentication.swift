@@ -74,60 +74,20 @@ protocol AuthorizationProviding: Sendable {
     func invalidate() async
 }
 
-protocol CommandRunning: Sendable {
-    func run(executable: URL, arguments: [String]) async throws -> Data
-}
-
 struct AzureCLICommandRunner: CommandRunning {
     var timeout: TimeInterval = 30
 
     func run(executable: URL, arguments: [String]) async throws -> Data {
-        try Task.checkCancellation()
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
-        let timeout = timeout
-        let task = Task.detached(priority: .utility) {
-            try Task.checkCancellation()
-            do {
-                try process.run()
-            } catch {
-                throw ReviewQError.cliUnavailable
-            }
-            let deadline = Date().addingTimeInterval(timeout)
-            let timeoutAction = DispatchWorkItem {
-                if process.isRunning { process.terminate() }
-            }
-            DispatchQueue.global(qos: .utility).asyncAfter(
-                deadline: .now() + timeout, execute: timeoutAction
+        do {
+            return try await LocalCommandRunner(timeout: timeout).run(
+                executable: executable, arguments: arguments
             )
-            defer {
-                timeoutAction.cancel()
-                if process.isRunning {
-                    process.terminate()
-                    process.waitUntilExit()
-                }
-                output.fileHandleForReading.closeFile()
+        } catch let error as LocalCommandError {
+            switch error {
+            case .unavailable: throw ReviewQError.cliUnavailable
+            case .timeout: throw ReviewQError.cliTimeout
+            case .failed(let code): throw ReviewQError.cliFailure(code)
             }
-            if Task.isCancelled, process.isRunning { process.terminate() }
-            let data = try output.fileHandleForReading.readToEnd() ?? Data()
-            process.waitUntilExit()
-            try Task.checkCancellation()
-            if Date() >= deadline { throw ReviewQError.cliTimeout }
-            guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-                throw ReviewQError.cliFailure(process.terminationStatus)
-            }
-            return data
-        }
-        return try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-            if process.isRunning { process.terminate() }
         }
     }
 }

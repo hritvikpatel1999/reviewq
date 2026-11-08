@@ -130,7 +130,12 @@ struct DashboardView: View {
                                     }
                                 }
                             ),
-                            open: { app.open($0.url) }
+                            open: { app.open($0.url) },
+                            openInEdge: { app.openInEdge($0.url) },
+                            review: { request, assistant in
+                                Task { await app.review(request, with: assistant) }
+                            },
+                            isLaunchingReview: app.isLaunchingReview
                         )
                     }
                 }
@@ -175,12 +180,19 @@ struct RepositoryDropdown: View {
     let group: RepositoryGroup
     @Binding var isExpanded: Bool
     let open: (ReviewPullRequest) -> Void
+    let openInEdge: (ReviewPullRequest) -> Void
+    let review: (ReviewPullRequest, ReviewAssistant) -> Void
+    let isLaunchingReview: Bool
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(spacing: 6) {
                 ForEach(group.requests) { request in
-                    PullRequestRow(request: request) { open(request) }
+                    PullRequestRow(
+                        request: request, open: { open(request) },
+                        openInEdge: { openInEdge(request) },
+                        review: { review(request, $0) }, isLaunchingReview: isLaunchingReview
+                    )
                 }
             }
             .padding(.top, 10)
@@ -238,44 +250,138 @@ private struct RepositoryDisclosureStyle: DisclosureGroupStyle {
 struct PullRequestRow: View {
     let request: ReviewPullRequest
     let open: () -> Void
+    let openInEdge: () -> Void
+    let review: (ReviewAssistant) -> Void
+    let isLaunchingReview: Bool
     @State private var isHovered = false
 
     var body: some View {
-        Button(action: open) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack {
-                    if request.isRequired {
-                        Text("Required").font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+        ZStack(alignment: .topTrailing) {
+            Button(action: open) {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        if request.isRequired {
+                            Text("Required").font(.system(size: 10, weight: .medium))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        }
+                        if request.isDraft { Text("Draft").font(.caption2).foregroundStyle(.secondary) }
+                        Text(request.reviewStage.label).font(.caption2).foregroundStyle(.secondary)
+                            .help(request.reviewStage.explanation)
+                        Spacer(minLength: 84)
                     }
-                    if request.isDraft { Text("Draft").font(.caption2).foregroundStyle(.secondary) }
-                    Text(request.reviewStage.label).font(.caption2).foregroundStyle(.secondary)
-                        .help(request.reviewStage.explanation)
-                    Spacer()
-                    Image(systemName: "arrow.up.right").font(.caption2).foregroundStyle(.tertiary)
+                    .frame(height: 22)
+                    Text(request.title).font(.system(size: 13, weight: .medium)).lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    HStack {
+                        Text(request.author).lineLimit(1)
+                        Spacer()
+                        Text(request.createdAt, style: .relative)
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
                 }
-                Text(request.title).font(.system(size: 13, weight: .medium)).lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                HStack {
-                    Text(request.author).lineLimit(1)
-                    Spacer()
-                    Text(request.createdAt, style: .relative)
-                    Text("old")
-                }
-                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .contentShape(RoundedRectangle(cornerRadius: 9))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Pull request: \(request.title), by \(request.author), \(request.reviewStage.label)")
+            .help("Open pull request in your browser")
+
+            HStack(spacing: 6) {
+                Button(action: openInEdge) {
+                    EdgeBrowserIcon().frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                .accessibilityLabel("Open in Microsoft Edge: \(request.title)")
+                .help("Open PR in Microsoft Edge")
+                ForEach(ReviewAssistant.allCases, id: \.self) { assistant in
+                    Button { review(assistant) } label: {
+                        ReviewAssistantIcon(assistant: assistant)
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .disabled(isLaunchingReview)
+                    .accessibilityLabel("Review with \(assistant.name): \(request.title)")
+                    .help("Review with \(assistant.name)")
+                }
+            }
+            .buttonStyle(PRIconButtonStyle())
             .padding(10)
-            .background(
-                isHovered ? Color.accentColor.opacity(0.09) : Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: 9)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
-        .buttonStyle(.plain)
+        .background(
+            isHovered ? Color.accentColor.opacity(0.09) : Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
         .onHover { isHovered = $0 }
-        .accessibilityLabel("Pull request: \(request.title), by \(request.author), \(request.reviewStage.label)")
-        .help("Open pull request in your browser")
+    }
+}
+
+struct PRIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Feedback(configuration: configuration)
+    }
+
+    private struct Feedback: View {
+        let configuration: Configuration
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .modifier(PRIconAffordance(isHovered: isHovered, isPressed: configuration.isPressed))
+                .onHover { isHovered = $0 }
+        }
+    }
+}
+
+struct PRIconAffordance: ViewModifier {
+    let isHovered: Bool
+    let isPressed: Bool
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var highlighted: Bool { isEnabled && (isHovered || isPressed) }
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isEnabled && isHovered ? 1.15 : 1)
+            .frame(width: 22, height: 22)
+            .background(
+                Color.accentColor.opacity(highlighted ? 0.18 : 0),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor.opacity(highlighted ? 0.3 : 0), lineWidth: 1)
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: highlighted)
+    }
+}
+
+private struct EdgeBrowserIcon: View {
+    var body: some View {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.edgemac") {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable().scaledToFit().frame(width: 20, height: 20)
+        } else {
+            Image(systemName: "globe").font(.system(size: 16)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ReviewAssistantIcon: View {
+    let assistant: ReviewAssistant
+
+    var body: some View {
+        if let url = assistant.applicationURL {
+            if assistant == .copilot,
+               let image = NSImage(contentsOf: url.appendingPathComponent("Contents/Resources/app/extensions/copilot/assets/copilot.png")) {
+                Image(nsImage: image).resizable().scaledToFit().frame(width: 20, height: 20)
+            } else {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                    .resizable().scaledToFit().frame(width: 20, height: 20)
+            }
+        } else {
+            Image(systemName: assistant == .scout ? "safari" : "sparkles")
+                .font(.system(size: 16)).foregroundStyle(.secondary)
+        }
     }
 }

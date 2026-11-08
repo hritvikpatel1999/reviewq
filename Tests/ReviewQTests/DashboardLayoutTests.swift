@@ -9,10 +9,15 @@ import XCTest
 final class DashboardLayoutTests: XCTestCase {
     func testReviewStagesAreBesideDraftWithoutNumbersOrAnotherRow() throws {
         var heights: Set<Int> = []
-        for stage in [ReviewStage.firstReview, .reReview] {
+        for stage in ReviewStage.allCases {
             for draft in [false, true] {
-                let request = fixture(stage: stage, draft: draft)
-                let image = try render(PullRequestRow(request: request, open: {}).frame(width: 392))
+                let request = fixture(stage: stage, draft: draft, required: true)
+                let image = try render(
+                    PullRequestRow(
+                        request: request, open: {}, openInEdge: {}, review: { _ in }, isLaunchingReview: false
+                    )
+                        .frame(width: 392)
+                )
                 heights.insert(image.height)
                 let lines = try recognize(image)
                 XCTAssertTrue(lines.contains { $0.contains(stage.label) }, "\(lines)")
@@ -23,6 +28,7 @@ final class DashboardLayoutTests: XCTestCase {
                 }
                 XCTAssertFalse(lines.joined().contains(String(request.number)))
                 XCTAssertFalse(lines.joined().contains("#"))
+                XCTAssertFalse(lines.contains { $0.split(separator: " ").contains("old") })
             }
         }
         XCTAssertEqual(heights.count, 1, "Review labels must not add height to the PR row")
@@ -70,14 +76,14 @@ final class DashboardLayoutTests: XCTestCase {
 
     private func fixture(
         number: Int = 8675309, createdAt: TimeInterval = 1,
-        stage: ReviewStage = .firstReview, draft: Bool = false
+        stage: ReviewStage = .firstReview, draft: Bool = false, required: Bool = false
     ) -> ReviewPullRequest {
         ReviewPullRequest(
             number: number, title: "A compact pull request row", author: "A reviewer",
             organization: "example", project: "Project", repository: "Service", repositoryID: "service-id",
             createdAt: Date(timeIntervalSince1970: createdAt),
             url: URL(string: "https://dev.azure.com/example/Project/_git/service/pullrequest/\(number)")!,
-            isRequired: false, isDraft: draft, reviewStage: stage
+            isRequired: required, isDraft: draft, reviewStage: stage
         )
     }
 

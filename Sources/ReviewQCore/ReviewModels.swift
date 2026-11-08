@@ -1,20 +1,63 @@
 import Foundation
 
-public enum ReviewStage: String, Sendable {
+public enum ReviewStage: String, CaseIterable, Sendable {
     case firstReview
-    case reReview
+    case approved, approvedWithSuggestions, waitedForAuthor, rejected, commented
 
     public var label: String {
         switch self {
         case .firstReview: "First Review"
-        case .reReview: "Re-review"
+        case .approved: "You Approved"
+        case .approvedWithSuggestions: "You Approved with Suggestions"
+        case .waitedForAuthor: "You Waited for Author"
+        case .rejected: "You Rejected"
+        case .commented: "You Commented"
         }
     }
 
     public var explanation: String {
         switch self {
-        case .firstReview: "No previous vote or review comment from you was found."
-        case .reReview: "You have already voted or left a review comment on this pull request."
+        case .firstReview: "No previous nonzero vote or review comment from you was found."
+        case .approved: "Your last recorded nonzero vote was Approved. This PR needs your vote again."
+        case .approvedWithSuggestions:
+            "Your last recorded nonzero vote was Approved with suggestions. This PR needs your vote again."
+        case .waitedForAuthor:
+            "Your last recorded nonzero vote was Waiting for author. This PR needs your vote again."
+        case .rejected: "Your last recorded nonzero vote was Rejected. This PR needs your vote again."
+        case .commented: "You previously left a review comment, but no nonzero vote from you was found."
+        }
+    }
+
+    static func fromHistory(_ threads: [APIReviewThread], reviewerID: UUID) throws -> Self {
+        let votes = threads.compactMap { thread -> (thread: APIReviewThread, vote: Int)? in
+            guard thread.voterID == reviewerID, let vote = thread.properties?.vote, vote != 0 else { return nil }
+            return (thread, vote)
+        }
+        guard let first = votes.first else {
+            return threads.contains { $0.hasReviewComment(from: reviewerID) } ? .commented : .firstReview
+        }
+        if Set(votes.map(\.vote)).count == 1 { return try fromVote(first.vote) }
+        guard votes.allSatisfy({ $0.thread.publishedDate != nil }),
+              let newestDate = votes.compactMap({ $0.thread.publishedDate }).max() else {
+            throw ReviewQError.invalidResponse("Azure DevOps review-history chronology")
+        }
+        let newest = votes.filter { $0.thread.publishedDate == newestDate }
+        if let first = newest.first, Set(newest.map(\.vote)).count == 1 { return try fromVote(first.vote) }
+        let identifiers = newest.compactMap { $0.thread.id }
+        guard identifiers.count == newest.count, Set(identifiers).count == newest.count,
+              let latest = zip(identifiers, newest).max(by: { $0.0 < $1.0 }) else {
+            throw ReviewQError.invalidResponse("Azure DevOps review-history chronology")
+        }
+        return try fromVote(latest.1.vote)
+    }
+
+    private static func fromVote(_ vote: Int) throws -> Self {
+        switch vote {
+        case 10: .approved
+        case 5: .approvedWithSuggestions
+        case -5: .waitedForAuthor
+        case -10: .rejected
+        default: throw ReviewQError.invalidResponse("Azure DevOps review vote")
         }
     }
 }
@@ -129,16 +172,20 @@ struct APIPullRequest: Decodable, Sendable {
 }
 
 struct APIReviewThread: Decodable, Sendable {
+    let id: Int?
+    let publishedDate: Date?
     let comments: [APIReviewComment]
     let properties: APIReviewThreadProperties?
     let voterID: UUID?
 
     private enum CodingKeys: String, CodingKey {
-        case comments, properties, identities
+        case id, publishedDate, comments, properties, identities
     }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(Int.self, forKey: .id)
+        publishedDate = try container.decodeIfPresent(Date.self, forKey: .publishedDate)
         comments = try container.decode([APIReviewComment].self, forKey: .comments)
         properties = try container.decodeIfPresent(APIReviewThreadProperties.self, forKey: .properties)
         if let directID = properties?.voterID {
@@ -156,9 +203,8 @@ struct APIReviewThread: Decodable, Sendable {
         }
     }
 
-    func hasReviewActivity(from reviewerID: UUID) -> Bool {
-        if voterID == reviewerID, let vote = properties?.vote, vote != 0 { return true }
-        return comments.contains {
+    func hasReviewComment(from reviewerID: UUID) -> Bool {
+        comments.contains {
             $0.author.id == reviewerID
                 && $0.isReviewComment(inSystemThread: properties?.isSystemThread == true)
         }
@@ -245,6 +291,11 @@ struct APIReviewThreadProperties: Decodable, Sendable {
                     )
                 }
                 value = number
+            }
+            guard [-10, -5, 0, 5, 10].contains(value) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container, debugDescription: "Unsupported review vote."
+                )
             }
         }
     }

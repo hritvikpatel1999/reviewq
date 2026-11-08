@@ -42,15 +42,20 @@ func reviewThreadsResponse(_ items: [String] = [], status: Int = 200) -> HTTPRes
 
 func voteThreadJSON(
     voter: String = reviewerID, vote: Int = 10, numeric: Bool = false,
-    useIdentityReference: Bool = false
+    useIdentityReference: Bool = false, id: Int? = nil, publishedDate: String? = nil,
+    lastUpdatedDate: String? = nil
 ) -> String {
     let value = numeric ? String(vote) : "\"\(vote)\""
     let voterProperty = useIdentityReference
         ? "\"CodeReviewVotedByIdentity\":{\"$type\":\"System.String\",\"$value\":\"1\"}"
         : "\"CodeReviewVotedByTfId\":{\"$type\":\"System.String\",\"$value\":\"\(voter)\"}"
     let identitiesField = useIdentityReference ? ",\"identities\":{\"1\":{\"id\":\"\(voter)\"}}" : ""
+    let idField = id.map { "\"id\":\($0)," } ?? ""
+    let dateField = publishedDate.map { "\"publishedDate\":\"\($0)\"," } ?? ""
+    let updatedField = lastUpdatedDate.map { "\"lastUpdatedDate\":\"\($0)\"," } ?? ""
     return """
     {
+      \(idField)\(dateField)\(updatedField)
       "comments":[{"author":{"id":"\(authorID)"},"commentType":"system"}],
       "properties":{
         "CodeReviewThreadType":{"$type":"System.String","$value":"VoteUpdate"},

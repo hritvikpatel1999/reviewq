@@ -8,7 +8,7 @@ final class ReviewHistoryTests: XCTestCase {
         let transport = StubTransport(
             [
                 connectionResponse(),
-                pullRequestsResponse((1...11).map { pullRequestJSON(number: $0) })
+                pullRequestsResponse((1...13).map { pullRequestJSON(number: $0) })
             ],
             histories: [
                 2: reviewThreadsResponse([voteThreadJSON(voter: reviewerID.uppercased())]),
@@ -20,19 +20,21 @@ final class ReviewHistoryTests: XCTestCase {
                 8: reviewThreadsResponse([reviewCommentThreadJSON(deleted: true)]),
                 9: reviewThreadsResponse([voteThreadJSON(vote: -5, numeric: true)]),
                 10: reviewThreadsResponse([reviewCommentThreadJSON(type: "codeChange")]),
-                11: reviewThreadsResponse([voteThreadJSON(), voteThreadJSON(vote: 0)])
+                11: reviewThreadsResponse([voteThreadJSON(), voteThreadJSON(vote: 0)]),
+                12: reviewThreadsResponse([voteThreadJSON(vote: 5)]),
+                13: reviewThreadsResponse([voteThreadJSON(vote: -10)])
             ]
         )
         let loader = AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
         let result = try await loader.load(configuration: configuration())
         let stages = Dictionary(uniqueKeysWithValues: result.pullRequests.map { ($0.number, $0.reviewStage) })
         XCTAssertEqual(stages, [
-            1: .firstReview, 2: .reReview, 3: .reReview, 4: .firstReview, 5: .firstReview,
-            6: .firstReview, 7: .firstReview, 8: .reReview, 9: .reReview, 10: .firstReview,
-            11: .reReview
+            1: .firstReview, 2: .approved, 3: .commented, 4: .firstReview, 5: .firstReview,
+            6: .firstReview, 7: .firstReview, 8: .commented, 9: .waitedForAuthor, 10: .firstReview,
+            11: .approved, 12: .approvedWithSuggestions, 13: .rejected
         ])
         let requests = await transport.requests.filter { $0.url?.path.hasSuffix("/threads") == true }
-        XCTAssertEqual(requests.count, 11)
+        XCTAssertEqual(requests.count, 13)
         XCTAssertTrue(requests.allSatisfy {
             $0.url?.path.contains("/_apis/git/repositories/repo-id/pullRequests/") == true
                 && $0.httpMethod == "GET" && $0.value(forHTTPHeaderField: "Authorization") != nil
@@ -49,7 +51,7 @@ final class ReviewHistoryTests: XCTestCase {
         XCTAssertEqual(first.pullRequests.first?.reviewStage, .firstReview)
         await transport.setHistory(reviewThreadsResponse([reviewCommentThreadJSON()]), for: 1)
         let next = try await loader.load(configuration: configuration())
-        XCTAssertEqual(next.pullRequests.first?.reviewStage, .reReview)
+        XCTAssertEqual(next.pullRequests.first?.reviewStage, .commented)
     }
 
     func testLegacyCommentsWithoutTypesUseAuthorshipAndDiscussionEvidence() async throws {
@@ -81,8 +83,8 @@ final class ReviewHistoryTests: XCTestCase {
         let result = try await loader.load(configuration: configuration())
         let stages = Dictionary(uniqueKeysWithValues: result.pullRequests.map { ($0.number, $0.reviewStage) })
         XCTAssertEqual(stages, [
-            1: .reReview, 2: .firstReview, 3: .firstReview, 4: .reReview,
-            5: .firstReview, 6: .reReview, 7: .firstReview, 8: .reReview
+            1: .commented, 2: .firstReview, 3: .firstReview, 4: .commented,
+            5: .firstReview, 6: .commented, 7: .firstReview, 8: .commented
         ])
     }
 
@@ -95,7 +97,7 @@ final class ReviewHistoryTests: XCTestCase {
         )
         let loader = AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
         let result = try await loader.load(configuration: configuration())
-        XCTAssertEqual(result.pullRequests.first?.reviewStage, .reReview)
+        XCTAssertEqual(result.pullRequests.first?.reviewStage, .commented)
     }
 
     func testLegacyVotesResolveTheVoterFromTheThreadIdentityTable() async throws {
@@ -122,8 +124,8 @@ final class ReviewHistoryTests: XCTestCase {
         let result = try await loader.load(configuration: configuration())
         let stages = Dictionary(uniqueKeysWithValues: result.pullRequests.map { ($0.number, $0.reviewStage) })
         XCTAssertEqual(stages, [
-            1: .reReview, 2: .firstReview, 3: .firstReview,
-            4: .reReview, 5: .reReview, 6: .firstReview
+            1: .approved, 2: .firstReview, 3: .firstReview,
+            4: .waitedForAuthor, 5: .approved, 6: .firstReview
         ])
     }
 
@@ -143,7 +145,90 @@ final class ReviewHistoryTests: XCTestCase {
         https://dev.azure.com/another/Project
         """))
         let stages = Dictionary(uniqueKeysWithValues: result.pullRequests.map { ($0.organization, $0.reviewStage) })
-        XCTAssertEqual(stages, ["example": .reReview, "another": .firstReview])
+        XCTAssertEqual(stages, ["example": .approved, "another": .firstReview])
+    }
+
+    func testLatestPriorVoteUsesPublicationTimeNotResponseOrderOrLaterCommentEdits() async throws {
+        let approved = voteThreadJSON(
+            id: 1, publishedDate: "2026-10-01T12:00:01.1234567Z",
+            lastUpdatedDate: "2026-10-10T12:00:00Z"
+        )
+        let suggestions = voteThreadJSON(vote: 5, id: 2, publishedDate: "2026-10-01T12:00:02Z")
+        let waited = voteThreadJSON(vote: -5, id: 3, publishedDate: "2026-10-01T12:00:03Z")
+        let reset = voteThreadJSON(vote: 0, id: 4, publishedDate: "2026-10-01T12:00:04Z")
+        let otherReviewer = voteThreadJSON(
+            voter: authorID, vote: -10, id: 5, publishedDate: "2026-10-01T12:00:05Z"
+        )
+        let histories = [
+            [approved, waited, suggestions, reset, otherReviewer],
+            [otherReviewer, reset, suggestions, waited, approved],
+            [waited, approved, reset, otherReviewer, suggestions]
+        ]
+        for history in histories {
+            let transport = StubTransport(
+                [connectionResponse(), pullRequestsResponse([pullRequestJSON()])],
+                histories: [1: reviewThreadsResponse(history + [reviewCommentThreadJSON()])]
+            )
+            let loader = AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
+            let result = try await loader.load(configuration: configuration())
+            XCTAssertEqual(result.pullRequests.first?.reviewStage, .waitedForAuthor)
+        }
+    }
+
+    func testThreadIdentifiersBreakEqualPublicationTimeTies() async throws {
+        let approved = voteThreadJSON(id: 21, publishedDate: "2026-10-01T12:00:00Z")
+        let rejected = voteThreadJSON(vote: -10, id: 22, publishedDate: "2026-10-01T12:00:00Z")
+        for history in [[approved, rejected], [rejected, approved]] {
+            let transport = StubTransport(
+                [connectionResponse(), pullRequestsResponse([pullRequestJSON()])],
+                histories: [1: reviewThreadsResponse(history)]
+            )
+            let result = try await AzureDevOpsReviewLoader(
+                authorization: StubAuthorization(), transport: transport
+            ).load(configuration: configuration())
+            XCTAssertEqual(result.pullRequests.first?.reviewStage, .rejected)
+        }
+    }
+
+    func testUnknownVotesAndAmbiguousChronologyFailInsteadOfGuessingAStatus() async throws {
+        let histories = [
+            [voteThreadJSON(vote: 123)],
+            [voteThreadJSON(publishedDate: "not-a-date")],
+            [voteThreadJSON(), voteThreadJSON(vote: -5)],
+            [
+                voteThreadJSON(publishedDate: "2026-10-01T12:00:00Z"),
+                voteThreadJSON(vote: -5, publishedDate: "2026-10-01T12:00:00Z")
+            ],
+            [
+                voteThreadJSON(id: 21, publishedDate: "2026-10-01T12:00:00Z"),
+                voteThreadJSON(vote: -5, id: 21, publishedDate: "2026-10-01T12:00:00Z")
+            ]
+        ]
+        for history in histories {
+            let transport = StubTransport(
+                [connectionResponse(), pullRequestsResponse([pullRequestJSON()])],
+                histories: [1: reviewThreadsResponse(history)]
+            )
+            do {
+                _ = try await AzureDevOpsReviewLoader(
+                    authorization: StubAuthorization(), transport: transport
+                ).load(configuration: configuration())
+                XCTFail("Unsupported or ambiguous history must not become a guessed review label.")
+            } catch { XCTAssertTrue(error is ReviewQError) }
+        }
+    }
+
+    func testMatchingLegacyVotesNeedNoChronologyAndResetDoesNotEraseApproval() async throws {
+        let transport = StubTransport(
+            [connectionResponse(), pullRequestsResponse([pullRequestJSON()])],
+            histories: [1: reviewThreadsResponse([
+                voteThreadJSON(), voteThreadJSON(useIdentityReference: true), voteThreadJSON(vote: 0)
+            ])]
+        )
+        let result = try await AzureDevOpsReviewLoader(
+            authorization: StubAuthorization(), transport: transport
+        ).load(configuration: configuration())
+        XCTAssertEqual(result.pullRequests.first?.reviewStage, .approved)
     }
 
     func testHistoryIsRequestedOnlyForEligiblePendingPRs() async throws {

@@ -19,11 +19,13 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case requestStarted, requestFinished, requestFailed, requestCancelled
     case settingsSaved, settingsFailed, patDeleted, patDeleteFailed
     case loginItemChanged, loginItemFailed, browserOpenFailed, applicationActionFailed, diagnosticsOpened
+    case reviewLaunchStarted, reviewLaunchFinished, reviewLaunchFailed
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
     case identity, projects, pullRequests, reviewHistory, reviews
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
+    case scout, copilot
 }
 
 public enum DiagnosticReason: String, Codable, Sendable {

@@ -76,6 +76,61 @@ final class RepositoryDropdownTests: XCTestCase {
         XCTAssertGreaterThan(host.intrinsicContentSize.height, originalHeight + 100)
     }
 
+    func testPRIconsDispatchIndependentlyAndDoNotOpenTheBrowserForAIReviews() async throws {
+        _ = NSApplication.shared
+        let request = try request(number: 42)
+        var opened = 0
+        var edgeOpened = 0
+        var assistants: [ReviewAssistant] = []
+        let host = NSHostingView(rootView: PullRequestRow(
+            request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
+            review: { assistants.append($0) },
+            isLaunchingReview: false
+        ).frame(width: 392))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 392, height: 120),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await settle(host)
+        let top = host.isFlipped
+            ? host.bounds.midY - host.intrinsicContentSize.height / 2
+            : host.bounds.midY + host.intrinsicContentSize.height / 2
+        let direction: CGFloat = host.isFlipped ? 1 : -1
+        let y = top + direction * 21
+        try click(NSPoint(x: 371, y: y), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(assistants, [.copilot])
+        XCTAssertEqual(opened, 0)
+        try click(NSPoint(x: 343, y: y), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(assistants, [.copilot, .scout])
+        XCTAssertEqual(opened, 0)
+        try click(NSPoint(x: 315, y: y), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(edgeOpened, 1)
+        XCTAssertEqual(opened, 0, "The Edge shortcut must not invoke the default-browser action.")
+        try click(NSPoint(x: 100, y: top + direction * 48), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(opened, 1, "Clicking the row should still open the default browser.")
+
+        host.rootView = PullRequestRow(
+            request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
+            review: { assistants.append($0) },
+            isLaunchingReview: true
+        ).frame(width: 392)
+        try await settle(host)
+        try click(NSPoint(x: 371, y: y), in: host, window: window)
+        try click(NSPoint(x: 343, y: y), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(assistants, [.copilot, .scout], "AI buttons must be disabled during a launch.")
+        XCTAssertEqual(opened, 1, "Disabled AI buttons must not fall through to the underlying row button.")
+        XCTAssertEqual(edgeOpened, 1)
+    }
+
     private func request(
         number: Int, organization: String = "example", repository: String = "Service"
     ) throws -> ReviewPullRequest {
@@ -87,6 +142,57 @@ final class RepositoryDropdownTests: XCTestCase {
             url: try XCTUnwrap(URL(string: "https://dev.azure.com/\(organization)/Project/_git/repo/pullrequest/\(number)")),
             isRequired: false, isDraft: false, reviewStage: .firstReview
         )
+    }
+
+    func testIconHoverEnlargesTheGlyphWithoutChangingLayoutAndDisabledIconsStayStill() async throws {
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: hoverGlyph(hovered: false, disabled: false))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 60),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await settle(host)
+        let layout = host.intrinsicContentSize
+        let before = try redGlyphWidth(host)
+        host.rootView = hoverGlyph(hovered: true, disabled: false)
+        try await settle(host)
+        let hovered = try redGlyphWidth(host)
+        XCTAssertGreaterThanOrEqual(hovered, before * 1.1, "Hover should visibly enlarge the icon.")
+        XCTAssertLessThanOrEqual(hovered, before * 1.25, "Hover enlargement should stay subtle.")
+        XCTAssertEqual(host.intrinsicContentSize, layout, "Hover must not reflow the row.")
+        host.rootView = hoverGlyph(hovered: true, disabled: true)
+        try await settle(host)
+        XCTAssertEqual(try redGlyphWidth(host), before, accuracy: 1, "Disabled icons must not enlarge.")
+    }
+
+    private func hoverGlyph(hovered: Bool, disabled: Bool) -> some View {
+        Rectangle().fill(.red).frame(width: 12, height: 12)
+            .modifier(PRIconAffordance(isHovered: hovered, isPressed: false))
+            .disabled(disabled)
+            .frame(width: 100, height: 60)
+            .background(.white)
+    }
+
+    private func redGlyphWidth(_ host: NSView) throws -> CGFloat {
+        host.displayIfNeeded()
+        let image = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: image)
+        var columns: Set<Int> = []
+        for x in 0..<image.pixelsWide {
+            for y in 0..<image.pixelsHigh {
+                if let color = image.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                   color.redComponent > 0.5,
+                   color.redComponent - max(color.greenComponent, color.blueComponent) > 0.15 {
+                    columns.insert(x)
+                }
+            }
+        }
+        XCTAssertFalse(columns.isEmpty)
+        return CGFloat(columns.count)
     }
 
     private func makeHost(
@@ -149,9 +255,11 @@ private struct DropdownHarness: View {
     @ObservedObject var state: DropdownState
 
     var body: some View {
-        RepositoryDropdown(group: group, isExpanded: $state.isExpanded) {
-            state.openedRequest = $0.id
-        }
+        RepositoryDropdown(
+            group: group, isExpanded: $state.isExpanded,
+            open: { state.openedRequest = $0.id }, openInEdge: { _ in },
+            review: { _, _ in }, isLaunchingReview: false
+        )
         .frame(width: 416)
     }
 }

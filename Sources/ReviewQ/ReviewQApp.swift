@@ -27,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     let loginItem: LoginItemStore
     let diagnostics: DiagnosticsStore
     @Published var actionError: String?
+    @Published private(set) var isLaunchingReview = false
+    private let reviewLauncher: any ReviewLaunching
+    private let presentReviewError: @MainActor (ReviewLaunchError) -> Void
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
@@ -34,9 +37,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     private var subscriptions: Set<AnyCancellable> = []
     private let logger = Logger(subsystem: "dev.prbar.app", category: "application")
 
-    init(store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore()) {
+    init(
+        store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
+        reviewLauncher: any ReviewLaunching = ReviewLauncher(),
+        presentReviewError: @escaping @MainActor (ReviewLaunchError) -> Void = AppDelegate.showReviewError
+    ) {
         self.store = store
         self.diagnostics = diagnostics
+        self.reviewLauncher = reviewLauncher
+        self.presentReviewError = presentReviewError
         loginItem = LoginItemStore(diagnostics: diagnostics.logger)
         super.init()
     }
@@ -187,6 +196,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
                 "macOS could not open this link. Check your default browser.",
                 event: .browserOpenFailed, operation: .browser
             )
+        }
+    }
+
+    func review(_ request: ReviewPullRequest, with assistant: ReviewAssistant) async {
+        guard !isLaunchingReview else {
+            reportActionFailure(
+                "Wait for the current review chat to open before starting another.",
+                event: .reviewLaunchFailed, operation: assistant.diagnosticOperation
+            )
+            return
+        }
+        isLaunchingReview = true
+        actionError = nil
+        let requestID = UUID()
+        let start = ContinuousClock.now
+        diagnostics.logger.log(.info, .reviewLaunchStarted, operation: assistant.diagnosticOperation, requestID: requestID)
+        defer { isLaunchingReview = false }
+        do {
+            try await reviewLauncher.launch(assistant, for: request.url)
+            let duration = start.duration(to: .now).components
+            diagnostics.logger.log(
+                .info, .reviewLaunchFinished, operation: assistant.diagnosticOperation, requestID: requestID,
+                durationMilliseconds: Int(duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000)
+            )
+            closePopover()
+        } catch is CancellationError {
+            diagnostics.logger.log(
+                .info, .reviewLaunchFailed, operation: assistant.diagnosticOperation,
+                requestID: requestID, reason: .cancelled
+            )
+        } catch {
+            let failure: ReviewLaunchError
+            if let error = error as? ReviewLaunchError {
+                failure = error
+            } else if let error = error as? LocalCommandError {
+                switch error {
+                case .unavailable: failure = .appUnavailable(assistant)
+                case .timeout: failure = .commandTimedOut
+                case .failed(let code): failure = .commandFailed(code)
+                }
+            } else {
+                failure = .launchFailed
+            }
+            actionError = failure.localizedDescription
+            diagnostics.logger.log(
+                .warning, .reviewLaunchFailed, operation: assistant.diagnosticOperation,
+                requestID: requestID, reason: failure.diagnosticReason
+            )
+            logger.error("Review launch failed. Check ReviewQ Diagnostics.")
+            closePopover()
+            presentReviewError(failure)
+        }
+    }
+
+    func openInEdge(_ url: URL) {
+        guard let browser = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.edgemac") else {
+            reportActionFailure(
+                "Microsoft Edge is not installed. Install Edge, or click the PR row to use your default browser.",
+                event: .browserOpenFailed, operation: .browser, reason: .cliUnavailable
+            )
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration()) {
+            [weak self] application, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if application != nil {
+                    self.actionError = nil
+                    self.closePopover()
+                } else {
+                    self.reportActionFailure(
+                        "macOS could not open this PR in Edge. Check that Edge opens normally.",
+                        event: .browserOpenFailed, operation: .browser
+                    )
+                }
+            }
+        }
+    }
+
+    private static func showReviewError(_ error: ReviewLaunchError) {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Could not start review"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        if error == .accessibilityRequired { alert.addButton(withTitle: "Open Accessibility Settings") }
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn, error == .accessibilityRequired {
+            guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+                  NSWorkspace.shared.open(url) else {
+                let failure = NSAlert()
+                failure.messageText = "Open System Settings manually"
+                failure.informativeText = "Choose Privacy & Security > Accessibility and allow ReviewQ."
+                failure.runModal()
+                return
+            }
         }
     }
 
