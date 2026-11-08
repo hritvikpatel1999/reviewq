@@ -125,8 +125,12 @@ actor StubAuthorization: AuthorizationProviding {
 
 struct StubPATStore: PATStoring {
     var token: String? = "synthetic-token"
+    var onSave: (@Sendable (String) -> Void)?
     func load() -> String? { token }
-    func save(_ token: String) throws { _ = try KeychainPATStore.validate(token) }
+    func save(_ token: String) throws {
+        _ = try KeychainPATStore.validate(token)
+        onSave?(token)
+    }
     func remove() {}
 }
 

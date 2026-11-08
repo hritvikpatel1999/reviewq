@@ -4,7 +4,7 @@
 
 A standalone native macOS menu-bar app for Azure DevOps pull requests that need your review.
 ReviewQ does not require SwiftBar, LeetBar, or AppFoundations at build time or runtime.
-Version 2 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
+Version 2.1 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
 future version, not included in this release.
 
 ## Features
@@ -12,6 +12,8 @@ future version, not included in this release.
 - Native pull-request icon with the pending-review count.
 - Newest-first repository dropdowns with pending counts, author, age, review-stage labels, and one-click browser links.
 - Per-PR Edge, Scout, and Copilot actions with hover feedback.
+- Separate Scout/Copilot review instructions, with a 1,000-character limit per app.
+- Command-Option-Q to open or close the menu-bar queue from any app.
 - First Review, You Approved, You Approved with Suggestions, You Waited for Author, You Rejected,
   and You Commented labels based on your recorded review history.
 - Multiple Azure DevOps organizations and projects.
@@ -32,17 +34,51 @@ future version, not included in this release.
 - Show PR age without the redundant "old" suffix.
 
 Existing settings, saved PATs, launch-at-login identity, and diagnostics are preserved.
-The [version 1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v1.0.0) remains available.
+The [version 2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.0.0) and
+[version 1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v1.0.0) remain available.
 
-## Download version 2
+## What's new in version 2.1
 
-Download from the [ReviewQ v2.0.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.0.0).
+Version **2.1.0 / build 3** adds:
+
+- Separate **Scout** and **GitHub Copilot** additional instructions under **Settings > Review
+  instructions**. The fixed first line is always `Review PR: {PR Link}`; instructions are appended
+  after a blank line. Empty or whitespace-only instructions keep the version 2 default exactly.
+- A **1,000-character limit per app**, counting Unicode characters rather than bytes, with live
+  counters and visible validation. Over-limit input is not silently truncated and cannot be saved.
+  Ordinary multiline text is supported; tabs and other non-line-break control characters are rejected.
+  Surrounding whitespace is trimmed and line endings are normalized only when composing the prompt.
+- **Command-Option-Q** to open or close the menu-bar queue, including while another app is active.
+  It triggers once on release, not repeatedly while held. A conflicting shortcut is reported in
+  Settings with **Retry shortcut** after freeing the combination in the other app.
+
+For example, set Scout's additional instructions to `Use my review-pr skill. Focus on correctness.`
+and Copilot's to `Use my review workflow. Focus on regressions.` Then choose **Save and Refresh**.
+Each PR action uses only that assistant's latest saved instructions. Existing version 1/2 settings
+and saved PATs remain intact; missing prompt settings default to empty.
+
+Additional instructions are stored locally in preferences, **not encrypted in Keychain**.
+Do not put secrets in them. ReviewQ hands the PR link and the selected instructions to the local
+assistant; neither the instructions nor the composed prompt are included in diagnostics.
+Scout inserts line breaks without submitting early and verifies the complete draft before Send.
+The global shortcut needs no additional Accessibility or Input Monitoring permission.
+Scout's cold-launch automation remains unreliable; open Scout manually before
+trying its action. Launcher failures remain visible, and no blind typing or submission retry is used.
+
+Version 2.1.0 validation passed **104 native tests** and **101 Intel/Rosetta tests**; the three existing
+accurate Vision OCR layout checks remain native-only. Both actual Settings editors were tested
+at 1,000/1,001 characters, including the Save button boundary, and the global shortcut was tested
+against the running native popover from another app.
+
+## Download version 2.1
+
+Download from the [ReviewQ v2.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.1.0).
 The repository is private, so you must sign into a GitHub account with access.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-2.0.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-2.0.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-2.1.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-2.1.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -56,7 +92,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 2 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 2.1 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -65,7 +101,9 @@ Intel builds are exercised under Rosetta on Apple Silicon, not on physical Intel
 
 ## Build and open
 
-Requires **macOS 14+** and **Xcode 16+** (Swift 6). There are no third-party package dependencies.
+Requires **macOS 14+** and **Xcode 26+** (Swift 6.2 or later). Actor-isolated native shortcut
+cleanup uses Swift 6.2; the macOS deployment minimum is unchanged. There are no third-party
+package dependencies.
 
 ```sh
 git clone https://github.com/hritvikpatel1999/reviewq.git
@@ -111,12 +149,12 @@ arch -x86_64 "$(xcrun --find swift)" test --arch x86_64 \
 ```
 
 No tests are removed or weakened. ReviewQ itself does not use Vision or CoreML; OCR is only
-part of the layout test harness. Version 2 is not claimed to have been tested on physical Intel
+part of the layout test harness. ReviewQ is not claimed to have been tested on physical Intel
 hardware.
 
 ## Compatibility with PRBar
 
-ReviewQ was originally developed as PRBar. Version 2 deliberately retains the internal bundle
+ReviewQ was originally developed as PRBar. ReviewQ deliberately retains the internal bundle
 identifier `dev.prbar.app`, Azure DevOps Keychain service `dev.prbar.app.azure-devops`, preference
 keys, and `~/Library/Logs/PRBar` directory. This preserves existing configuration, saved PATs,
 verbose-logging preferences, and diagnostic history without a migration.
@@ -143,13 +181,14 @@ icon enlarges it by 15% and shows a rounded highlight without moving the row or 
 Hover animation respects Reduce Motion. The Edge shortcut opens explicitly in Edge; clicking
 the rest of the row still uses your default browser. Edge must be installed for its shortcut.
 The AI buttons start a fresh chat with
-exactly `Review PR: {PR Link}` and submit it; they do not automatically post a review or change
+`Review PR: {PR Link}` and submit it (plus any per-app instructions configured in version 2.1);
+they do not automatically post a review or change
 your Azure DevOps vote. The selected assistant's own permissions and review workflow still apply.
 
 - **Scout:** requires Microsoft Scout installed and signed in. Allow ReviewQ in **System Settings
   > Privacy & Security > Accessibility** on the first attempt, then click Scout again.
-  ReviewQ presses Scout's New chat control, verifies an empty composer, types only into that
-  confirmed focused control using events targeted to Scout's process, and presses Send.
+  ReviewQ presses New chat, verifies an empty composer, types only into that confirmed focused
+  control using events targeted to Scout's process, and presses Send.
   Submission is confirmed by the cleared draft and a new user message or running turn.
   Updating an ad-hoc signed build may require reapproving ReviewQ's Accessibility access.
 - **Copilot:** requires a current Visual Studio Code supporting `code chat`, with Copilot enabled
@@ -157,7 +196,8 @@ your Azure DevOps vote. The selected assistant's own permissions and review work
   with the prompt already submitted. It does not reuse or replace your current VS Code chat.
 
 No clipboard replacement, tokens, PR titles, or PR content are sent by ReviewQ. Only the selected
-PR link is handed to the local app; that assistant may fetch the PR through its own configured
+PR link and any configured additional instructions are handed to the local app; that assistant
+may fetch the PR through its own configured
 tools. Launch diagnostics contain only the assistant, outcome, timing, and safe failure reason,
 never the PR link or prompt. Missing apps, permissions, dialogs, changed drafts/focus, and
 unconfirmed submissions are surfaced explicitly. Scout UI changes may require adapting its

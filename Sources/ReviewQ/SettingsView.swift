@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var store: ReviewStore
     @ObservedObject var app: AppDelegate
     @ObservedObject var loginItem: LoginItemStore
+    @ObservedObject var menuShortcut: GlobalShortcutStore
     @State private var draft: ReviewConfiguration
     @State private var token = ""
     @State private var formError: String?
@@ -15,6 +16,7 @@ struct SettingsView: View {
         self.store = store
         self.app = app
         self.loginItem = loginItem
+        menuShortcut = app.menuShortcut
         _draft = State(initialValue: store.configuration)
     }
 
@@ -33,6 +35,7 @@ struct SettingsView: View {
                     }
                     sources
                     authentication
+                    additionalInstructions
                     preferences
                     startup
                     if let error = store.errorMessage {
@@ -66,6 +69,7 @@ struct SettingsView: View {
                 Button("Save and Refresh", action: save)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(promptValidationError != nil)
             }
             .padding(16)
         }
@@ -169,9 +173,44 @@ struct SettingsView: View {
                 Toggle("Include draft pull requests", isOn: $draft.includeDrafts)
                 Text("Only active, directly assigned PRs with no vote from you are shown.")
                     .font(.caption).foregroundStyle(.secondary)
+                Divider()
+                Text("Command-Option-Q opens or closes the review queue from any app.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = menuShortcut.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                    Button("Retry shortcut") { app.startMenuShortcut() }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
         } label: { Label("Review queue", systemImage: "line.3.horizontal.decrease.circle") }
+    }
+
+    private var promptValidationError: String? {
+        do {
+            try draft.validatedReviewPrompts()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private var additionalInstructions: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Always sent first: Review PR: {PR Link}")
+                    .font(.system(size: 11, design: .monospaced))
+                Text("Add separate instructions after the link, such as which skill to use. Leave blank for the default prompt.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ReviewInstructionsEditor(title: "Scout", text: $draft.scoutAdditionalInstructions)
+                ReviewInstructionsEditor(title: "GitHub Copilot", text: $draft.copilotAdditionalInstructions)
+                if let error = promptValidationError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                Text("Stored locally in preferences, not Keychain. Do not enter secrets.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: { Label("Review instructions", systemImage: "text.bubble") }
     }
 
     private var startup: some View {
@@ -186,6 +225,7 @@ struct SettingsView: View {
                 if loginItem.status == .requiresApproval {
                     Button("Open Login Items") { loginItem.openSystemSettings() }
                 }
+
                 if let error = loginItem.errorMessage {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
@@ -203,6 +243,30 @@ struct SettingsView: View {
         } catch {
             formError = error.localizedDescription
             didSave = false
+        }
+    }
+}
+
+struct ReviewInstructionsEditor: View {
+    let title: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title).font(.callout.weight(.medium))
+                Spacer()
+                Text("\(text.count) of \(ReviewConfiguration.additionalPromptCharacterLimit) characters")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(text.count > ReviewConfiguration.additionalPromptCharacterLimit ? Color.red : Color.secondary)
+            }
+            TextEditor(text: $text)
+                .font(.system(size: 12))
+                .scrollContentBackground(.hidden)
+                .frame(height: 70)
+                .padding(6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel("\(title) additional review instructions")
         }
     }
 }

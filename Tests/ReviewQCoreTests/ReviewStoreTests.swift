@@ -57,12 +57,53 @@ final class ReviewStoreTests: XCTestCase {
         settings.authentication = .personalAccessToken
         settings.includeDrafts = true
         settings.showCount = false
+        settings.scoutAdditionalInstructions = "Use Scout's review skill.\nCheck correctness."
+        settings.copilotAdditionalInstructions = "Use Copilot's review skill.\nCheck regressions."
         let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]))
         try store.save(settings, newPAT: "synthetic-token")
         let data = try XCTUnwrap(defaults.data(forKey: ReviewStore.settingsKey))
         XCTAssertFalse(try XCTUnwrap(String(data: data, encoding: .utf8)).contains("synthetic-token"))
         let restored = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]))
         XCTAssertEqual(restored.configuration, settings)
+    }
+
+    func testInvalidPromptsCannotReplacePreferencesSnapshotOrPAT() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let keychain = StubPATStore(token: "original-token", onSave: { _ in
+            XCTFail("Invalid prompts must be rejected before the saved PAT can be changed.")
+        })
+        let snapshot = ReviewSnapshot(pullRequests: [])
+        let store = ReviewStore(defaults: defaults, keychain: keychain, loader: StubReviewLoader([.success(snapshot)]))
+        var original = configuration()
+        original.authentication = .personalAccessToken
+        original.scoutAdditionalInstructions = "Original Scout instructions."
+        original.copilotAdditionalInstructions = "Original Copilot instructions."
+        try store.save(original)
+        await store.refresh()
+        let saved = try XCTUnwrap(defaults.data(forKey: ReviewStore.settingsKey))
+        for assistant in 0..<2 {
+            var invalid = original
+            if assistant == 0 { invalid.scoutAdditionalInstructions = String(repeating: "x", count: 1_001) }
+            else { invalid.copilotAdditionalInstructions = "Not allowed\tinput" }
+            XCTAssertThrowsError(try store.save(invalid, newPAT: "replacement-token"))
+            XCTAssertEqual(store.configuration, original)
+            XCTAssertEqual(defaults.data(forKey: ReviewStore.settingsKey), saved)
+            XCTAssertEqual(store.snapshot, snapshot)
+            XCTAssertEqual(keychain.load(), "original-token")
+        }
+    }
+
+    func testInvalidStoredPromptsAreVisibleEvenWithoutConfiguredSources() throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        var settings = ReviewConfiguration()
+        settings.copilotAdditionalInstructions = String(repeating: "x", count: 1_001)
+        defaults.set(try JSONEncoder().encode(settings), forKey: ReviewStore.settingsKey)
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]))
+        XCTAssertEqual(store.errorMessage, ReviewQError.reviewPromptTooLong.localizedDescription)
+        XCTAssertEqual(store.menuBarTitle, " !")
+        XCTAssertEqual(store.configuration.copilotAdditionalInstructions, settings.copilotAdditionalInstructions)
     }
 
     func testInvalidSettingsCannotReplaceSavedConfiguration() throws {

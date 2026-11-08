@@ -36,6 +36,7 @@ public final class ReviewStore: ObservableObject {
         if let data = defaults.data(forKey: Self.settingsKey) {
             do {
                 loaded = try JSONDecoder().decode(ReviewConfiguration.self, from: data)
+                try loaded.validatedReviewPrompts()
                 if loaded.hasSources { _ = try loaded.validatedSources() }
             } catch {
                 initialError = error is DecodingError

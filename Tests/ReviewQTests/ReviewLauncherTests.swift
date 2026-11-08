@@ -10,6 +10,63 @@ final class ReviewLauncherTests: XCTestCase {
         XCTAssertEqual(try ReviewLauncher.prompt(for: XCTUnwrap(URL(string: link))), "Review PR: \(link)")
     }
 
+    func testInstructionsFollowTheFixedLinkAndWhitespaceOnlyKeepsTheDefaultPrompt() throws {
+        let url = try link()
+        let base = "Review PR: \(url.absoluteString)"
+        for suffix in ["", " \n\r\n "] {
+            XCTAssertEqual(try ReviewLauncher.prompt(for: url, additionalInstructions: suffix), base)
+        }
+        XCTAssertEqual(
+            try ReviewLauncher.prompt(
+                for: url, additionalInstructions: " \nUse this skill.\r\nFocus on correctness.\u{2028}Keep it concise. \n"
+            ),
+            "\(base)\n\nUse this skill.\nFocus on correctness.\nKeep it concise."
+        )
+        XCTAssertEqual(
+            try ReviewLauncher.prompt(for: url, additionalInstructions: "Review PR: another link"),
+            "\(base)\n\nReview PR: another link"
+        )
+    }
+
+    func testInstructionLimitsAreEnforcedBeforeAnyAppIsResolvedOrOpened() async throws {
+        let launcher = ReviewLauncher(
+            applicationURL: { _ in XCTFail("Invalid instructions must not open an app."); return nil },
+            scoutLaunch: { _, _ in XCTFail("Invalid instructions must not type.") }
+        )
+        for assistant in ReviewAssistant.allCases {
+            for invalid in [String(repeating: "x", count: 1_001), "unsafe\u{0}input"] {
+                do {
+                    try await launcher.launch(assistant, for: link(), additionalInstructions: invalid)
+                    XCTFail("Expected invalid instructions.")
+                } catch {
+                    XCTAssertEqual(error as? ReviewLaunchError, .invalidInstructions)
+                }
+            }
+        }
+        let maximum = String(repeating: "x", count: 1_000)
+        XCTAssertEqual(
+            try ReviewLauncher.prompt(for: link(), additionalInstructions: maximum),
+            "Review PR: \(try link().absoluteString)\n\n\(maximum)"
+        )
+    }
+
+    func testScoutInputReconstructsMultilineUnicodeWithoutSplittingSurrogatePairsOrTypingReturnAsText() throws {
+        let suffix = "Use this skill.\n" + String(repeating: "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}", count: 200)
+        let prompt = try ReviewLauncher.prompt(for: link(), additionalInstructions: suffix)
+        let steps = ScoutPromptInput.steps(for: prompt)
+        XCTAssertEqual(steps.map(\.content).joined(), prompt)
+        XCTAssertEqual(steps.filter { $0 == .lineBreak }.count, 3)
+        for step in steps {
+            if case .text(let text) = step {
+                XCTAssertFalse(text.isEmpty)
+                XCTAssertLessThanOrEqual(text.utf16.count, 16)
+                XCTAssertFalse(text.contains("\n"))
+                XCTAssertFalse(text.contains("\u{fffd}"))
+            }
+        }
+        XCTAssertEqual(ScoutPromptInput.steps(for: ""), [])
+    }
+
     func testInvalidLinksAreRejectedBeforeOpeningAnApp() async throws {
         let runner = RecordingCommandRunner()
         let launcher = ReviewLauncher(
@@ -63,6 +120,25 @@ final class ReviewLauncherTests: XCTestCase {
         XCTAssertEqual(received?.1, "Review PR: \(url.absoluteString)")
         let commands = await runner.commands
         XCTAssertTrue(commands.isEmpty)
+    }
+
+    func testEachLauncherReceivesItsEntireAdditionalInstructionsLiterally() async throws {
+        let appURL = try fakeCodeApp()
+        defer { cleanup(appURL) }
+        let runner = RecordingCommandRunner()
+        var received: String?
+        let launcher = ReviewLauncher(
+            applicationURL: { _ in appURL }, runner: runner, scoutLaunch: { _, prompt in received = prompt }
+        )
+        let url = try link()
+        let instructions = "Use a 'review' skill.\nKeep $(printf literal) and & characters as text."
+        let expected = "Review PR: \(url.absoluteString)\n\n\(instructions)"
+        try await launcher.launch(.scout, for: url, additionalInstructions: instructions)
+        XCTAssertEqual(received, expected)
+        try await launcher.launch(.copilot, for: url, additionalInstructions: instructions)
+        let commands = await runner.commands
+        XCTAssertEqual(commands.count, 2)
+        XCTAssertEqual(commands[1].1, ["chat", "--mode", "agent", "--new-window", "--maximize", expected])
     }
 
     func testCopilotUsesABundledCLIAndANewAgentWindowWithOnePromptArgument() async throws {
@@ -127,8 +203,13 @@ final class ReviewLauncherTests: XCTestCase {
         logger.start()
         var shownError: ReviewLaunchError?
         let launcher = StubReviewLauncher(error: ReviewLaunchError.accessibilityRequired)
+        let store = ReviewStore(defaults: defaults)
+        var settings = ReviewConfiguration()
+        settings.sourceURLs = "https://dev.azure.com/example/Project"
+        settings.scoutAdditionalInstructions = "Synthetic private instructions never logged"
+        try store.save(settings)
         let app = AppDelegate(
-            store: ReviewStore(defaults: defaults), diagnostics: DiagnosticsStore(logger: logger, defaults: defaults),
+            store: store, diagnostics: DiagnosticsStore(logger: logger, defaults: defaults),
             reviewLauncher: launcher, presentReviewError: { shownError = $0 }
         )
         let request = try fixture()
@@ -142,6 +223,7 @@ final class ReviewLauncherTests: XCTestCase {
         XCTAssertFalse(text.contains(request.url.absoluteString))
         XCTAssertFalse(text.contains(request.title))
         XCTAssertFalse(text.contains("Review PR:"))
+        XCTAssertFalse(text.contains(settings.scoutAdditionalInstructions))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let records = try data.split(separator: 0x0a).map { try decoder.decode(DiagnosticRecord.self, from: Data($0)) }
@@ -173,6 +255,34 @@ final class ReviewLauncherTests: XCTestCase {
 
     private func link() throws -> URL {
         try XCTUnwrap(URL(string: "https://dev.azure.com/example/Project/_git/repo/pullrequest/42"))
+    }
+
+    func testAppSelectsOnlyTheSelectedAssistantsLatestSavedInstructions() async throws {
+        let suite = "ReviewQ-launch-tests-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ReviewStore(defaults: defaults)
+        let launcher = StubReviewLauncher()
+        let app = AppDelegate(
+            store: store, reviewLauncher: launcher,
+            presentReviewError: { _ in XCTFail("Valid instructions must not show an error.") }
+        )
+        var settings = ReviewConfiguration()
+        settings.sourceURLs = "https://dev.azure.com/example/Project"
+        settings.scoutAdditionalInstructions = "Use the Scout skill."
+        settings.copilotAdditionalInstructions = "Use the Copilot skill."
+        try store.save(settings)
+        let request = try fixture()
+        await app.review(request, with: .scout)
+        await app.review(request, with: .copilot)
+        settings.scoutAdditionalInstructions = "Use the updated Scout skill."
+        try store.save(settings)
+        await app.review(request, with: .scout)
+        XCTAssertEqual(launcher.requests.map(\.0), [.scout, .copilot, .scout])
+        XCTAssertEqual(launcher.requests.map(\.1), Array(repeating: request.url, count: 3))
+        XCTAssertEqual(launcher.requests.map(\.2), [
+            "Use the Scout skill.", "Use the Copilot skill.", "Use the updated Scout skill."
+        ])
     }
 
     private func fixture() throws -> ReviewPullRequest {
@@ -218,12 +328,12 @@ private actor RecordingCommandRunner: CommandRunning {
 @MainActor
 private final class StubReviewLauncher: ReviewLaunching {
     let error: (any Error)?
-    var requests: [(ReviewAssistant, URL)] = []
+    var requests: [(ReviewAssistant, URL, String)] = []
 
     init(error: (any Error)? = nil) { self.error = error }
 
-    func launch(_ assistant: ReviewAssistant, for url: URL) async throws {
-        requests.append((assistant, url))
+    func launch(_ assistant: ReviewAssistant, for url: URL, additionalInstructions: String) async throws {
+        requests.append((assistant, url, additionalInstructions))
         if let error { throw error }
     }
 }

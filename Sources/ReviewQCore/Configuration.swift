@@ -22,20 +22,56 @@ public enum RefreshInterval: Int, Codable, CaseIterable, Sendable {
 }
 
 public struct ReviewConfiguration: Codable, Equatable, Sendable {
+    public static let additionalPromptCharacterLimit = 1_000
+
     public var sourceURLs = ""
     public var authentication = AuthenticationMethod.azureCLI
     public var tenantID = ""
     public var refreshInterval = RefreshInterval.fiveMinutes
     public var includeDrafts = false
     public var showCount = true
+    public var scoutAdditionalInstructions = ""
+    public var copilotAdditionalInstructions = ""
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceURLs, authentication, tenantID, refreshInterval, includeDrafts, showCount
+        case scoutAdditionalInstructions, copilotAdditionalInstructions
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sourceURLs = try container.decode(String.self, forKey: .sourceURLs)
+        authentication = try container.decode(AuthenticationMethod.self, forKey: .authentication)
+        tenantID = try container.decode(String.self, forKey: .tenantID)
+        refreshInterval = try container.decode(RefreshInterval.self, forKey: .refreshInterval)
+        includeDrafts = try container.decode(Bool.self, forKey: .includeDrafts)
+        showCount = try container.decode(Bool.self, forKey: .showCount)
+        scoutAdditionalInstructions = container.contains(.scoutAdditionalInstructions)
+            ? try container.decode(String.self, forKey: .scoutAdditionalInstructions) : ""
+        copilotAdditionalInstructions = container.contains(.copilotAdditionalInstructions)
+            ? try container.decode(String.self, forKey: .copilotAdditionalInstructions) : ""
+    }
+
+    public static func validateAdditionalInstructions(_ instructions: String) throws {
+        guard instructions.count <= additionalPromptCharacterLimit else { throw ReviewQError.reviewPromptTooLong }
+        guard !instructions.unicodeScalars.contains(where: {
+            ($0.value < 0x20 || (0x7f...0x9f).contains($0.value)) && !CharacterSet.newlines.contains($0)
+        }) else { throw ReviewQError.invalidReviewPrompt }
+    }
+
+    public func validatedReviewPrompts() throws {
+        try Self.validateAdditionalInstructions(scoutAdditionalInstructions)
+        try Self.validateAdditionalInstructions(copilotAdditionalInstructions)
+    }
 
     public var hasSources: Bool {
         !sourceURLs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public func validatedSources() throws -> [ReviewSource] {
+        try validatedReviewPrompts()
         let lines = sourceURLs.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -143,6 +179,8 @@ public enum ReviewQError: LocalizedError, Sendable {
     case invalidSource(String)
     case duplicateSource(String)
     case invalidTenant
+    case reviewPromptTooLong
+    case invalidReviewPrompt
     case missingPAT
     case invalidPAT
     case keychain(Int32)
@@ -167,6 +205,10 @@ public enum ReviewQError: LocalizedError, Sendable {
             "The source \(source) appears more than once."
         case .invalidTenant:
             "Enter a valid Entra tenant ID (GUID) or tenant domain, or leave it blank."
+        case .reviewPromptTooLong:
+            "Each app's additional review instructions must be \(ReviewConfiguration.additionalPromptCharacterLimit) characters or fewer."
+        case .invalidReviewPrompt:
+            "Additional review instructions support text and line breaks, not tabs or other control characters."
         case .missingPAT:
             "No personal access token is saved. Add a Code (Read) PAT in Settings."
         case .invalidPAT:

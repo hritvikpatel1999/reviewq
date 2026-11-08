@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     let store: ReviewStore
     let loginItem: LoginItemStore
     let diagnostics: DiagnosticsStore
+    let menuShortcut: GlobalShortcutStore
     @Published var actionError: String?
     @Published private(set) var isLaunchingReview = false
     private let reviewLauncher: any ReviewLaunching
@@ -40,12 +41,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     init(
         store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
         reviewLauncher: any ReviewLaunching = ReviewLauncher(),
+        shortcutRegistrar: (any GlobalShortcutRegistering)? = nil,
         presentReviewError: @escaping @MainActor (ReviewLaunchError) -> Void = AppDelegate.showReviewError
     ) {
         self.store = store
         self.diagnostics = diagnostics
         self.reviewLauncher = reviewLauncher
         self.presentReviewError = presentReviewError
+        menuShortcut = GlobalShortcutStore(
+            registrar: shortcutRegistrar ?? CarbonShortcutRegistrar(diagnostics: diagnostics.logger),
+            diagnostics: diagnostics.logger
+        )
         loginItem = LoginItemStore(diagnostics: diagnostics.logger)
         super.init()
     }
@@ -87,10 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             .sink { [weak self] _ in self?.diagnostics.logger.log(.info, .sleep) }
             .store(in: &subscriptions)
         updateStatusItem()
+        startMenuShortcut()
         store.start()
         if CommandLine.arguments.contains("--diagnostics") {
             showDiagnostics()
-        } else if !store.configuration.hasSources || store.errorMessage != nil {
+        } else if !store.configuration.hasSources || store.errorMessage != nil || menuShortcut.errorMessage != nil {
             showSettings()
         }
     }
@@ -102,10 +109,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        menuShortcut.stop()
         store.stop()
         diagnostics.recordShutdown()
         subscriptions.removeAll()
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
+    }
+
+    func startMenuShortcut() {
+        menuShortcut.start { [weak self] in self?.togglePopover() }
     }
 
     @objc private func togglePopover() {
@@ -214,7 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         diagnostics.logger.log(.info, .reviewLaunchStarted, operation: assistant.diagnosticOperation, requestID: requestID)
         defer { isLaunchingReview = false }
         do {
-            try await reviewLauncher.launch(assistant, for: request.url)
+            try await reviewLauncher.launch(
+                assistant, for: request.url,
+                additionalInstructions: assistant.additionalInstructions(in: store.configuration)
+            )
             let duration = start.duration(to: .now).components
             diagnostics.logger.log(
                 .info, .reviewLaunchFinished, operation: assistant.diagnosticOperation, requestID: requestID,

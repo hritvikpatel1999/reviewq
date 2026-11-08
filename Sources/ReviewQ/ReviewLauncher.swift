@@ -9,6 +9,10 @@ enum ReviewAssistant: String, CaseIterable, Sendable {
     var bundleIdentifier: String { self == .scout ? "com.microsoft.clawpilot" : "com.microsoft.VSCode" }
     var diagnosticOperation: DiagnosticOperation { self == .scout ? .scout : .copilot }
 
+    func additionalInstructions(in configuration: ReviewConfiguration) -> String {
+        self == .scout ? configuration.scoutAdditionalInstructions : configuration.copilotAdditionalInstructions
+    }
+
     @MainActor
     var applicationURL: URL? {
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
@@ -16,14 +20,16 @@ enum ReviewAssistant: String, CaseIterable, Sendable {
 }
 
 enum ReviewLaunchError: LocalizedError, Equatable {
-    case invalidURL, appUnavailable(ReviewAssistant), unsupportedCopilotCLI
-    case accessibilityRequired, scoutNotReady, scoutDraftChanged, scoutControlUnavailable
+    case invalidURL, invalidInstructions, appUnavailable(ReviewAssistant), unsupportedCopilotCLI
+    case accessibilityRequired, scoutNotReady, scoutDraftChanged, scoutInputTimedOut, scoutControlUnavailable
     case submissionUnconfirmed, launchFailed, commandTimedOut, commandFailed(Int32)
 
     var errorDescription: String? {
         switch self {
         case .invalidURL:
             "This pull request does not have a valid HTTPS link."
+        case .invalidInstructions:
+            "Check the additional review instructions in Settings. Use up to \(ReviewConfiguration.additionalPromptCharacterLimit) characters of text and line breaks."
         case .appUnavailable(let assistant):
             assistant == .scout
                 ? "Install Microsoft Scout on this Mac, then try again."
@@ -36,6 +42,8 @@ enum ReviewLaunchError: LocalizedError, Equatable {
             "Scout's new-chat controls are not ready. Finish signing in or dismiss any dialog in Scout, then try again."
         case .scoutDraftChanged:
             "Scout's draft or focus changed. Nothing was submitted. Check Scout before trying again."
+        case .scoutInputTimedOut:
+            "Scout took too long to enter the review prompt. Nothing was submitted. Check the draft before retrying."
         case .scoutControlUnavailable:
             "Scout's chat controls could not be operated safely. Check Scout or update it, then try again."
         case .submissionUnconfirmed:
@@ -51,10 +59,10 @@ enum ReviewLaunchError: LocalizedError, Equatable {
 
     var diagnosticReason: DiagnosticReason {
         switch self {
-        case .invalidURL: .invalidConfiguration
+        case .invalidURL, .invalidInstructions: .invalidConfiguration
         case .appUnavailable, .unsupportedCopilotCLI: .cliUnavailable
         case .accessibilityRequired: .approvalPending
-        case .scoutNotReady, .commandTimedOut: .timeout
+        case .scoutNotReady, .scoutInputTimedOut, .commandTimedOut: .timeout
         case .commandFailed: .cliFailure
         default: .system
         }
@@ -63,7 +71,7 @@ enum ReviewLaunchError: LocalizedError, Equatable {
 
 @MainActor
 protocol ReviewLaunching {
-    func launch(_ assistant: ReviewAssistant, for url: URL) async throws
+    func launch(_ assistant: ReviewAssistant, for url: URL, additionalInstructions: String) async throws
 }
 
 @MainActor
@@ -84,12 +92,24 @@ struct ReviewLauncher: ReviewLaunching {
         self.scoutLaunch = scoutLaunch
     }
 
-    static func prompt(for url: URL) throws -> String {
+    static func prompt(for url: URL, additionalInstructions: String = "") throws -> String {
         guard url.scheme?.lowercased() == "https", let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.absoluteString.utf8.count <= 2_048,
               !url.absoluteString.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
         else { throw ReviewLaunchError.invalidURL }
-        return "Review PR: \(url.absoluteString)"
+        do {
+            try ReviewConfiguration.validateAdditionalInstructions(additionalInstructions)
+        } catch let error as ReviewQError {
+            switch error {
+            case .reviewPromptTooLong, .invalidReviewPrompt: throw ReviewLaunchError.invalidInstructions
+            default: throw error
+            }
+        }
+        let suffix = additionalInstructions.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: .newlines).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = "Review PR: \(url.absoluteString)"
+        return suffix.isEmpty ? base : "\(base)\n\n\(suffix)"
     }
 
     static func copilotArguments(prompt: String) -> [String] {
@@ -105,9 +125,9 @@ struct ReviewLauncher: ReviewLaunching {
         return environment
     }
 
-    func launch(_ assistant: ReviewAssistant, for url: URL) async throws {
+    func launch(_ assistant: ReviewAssistant, for url: URL, additionalInstructions: String = "") async throws {
         try Task.checkCancellation()
-        let prompt = try Self.prompt(for: url)
+        let prompt = try Self.prompt(for: url, additionalInstructions: additionalInstructions)
         guard let appURL = applicationURL(assistant) else {
             throw ReviewLaunchError.appUnavailable(assistant)
         }
@@ -126,6 +146,42 @@ struct ReviewLauncher: ReviewLaunching {
             try Task.checkCancellation()
             _ = try await runner.run(executable: executable, arguments: Self.copilotArguments(prompt: prompt))
         }
+    }
+}
+
+enum ScoutPromptInput: Equatable {
+    case text(String)
+    case lineBreak
+
+    var content: String {
+        switch self {
+        case .text(let text): text
+        case .lineBreak: "\n"
+        }
+    }
+
+    static func steps(for prompt: String) -> [Self] {
+        var result: [Self] = []
+        var chunk = ""
+        var units = 0
+        func flush() {
+            if !chunk.isEmpty { result.append(.text(chunk)) }
+            chunk = ""
+            units = 0
+        }
+        for scalar in prompt.unicodeScalars {
+            if scalar == "\n" {
+                flush()
+                result.append(.lineBreak)
+            } else {
+                let length = scalar.value > 0xffff ? 2 : 1
+                if units + length > 16 { flush() }
+                chunk.unicodeScalars.append(scalar)
+                units += length
+            }
+        }
+        flush()
+        return result
     }
 }
 
@@ -175,31 +231,31 @@ private struct ScoutReviewAutomation {
               AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
         else { throw ReviewLaunchError.scoutControlUnavailable }
         try await Task.sleep(for: .milliseconds(100))
-        var cursor = prompt.startIndex
         var typed = ""
-        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
-        while cursor < prompt.endIndex {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(120))
+        for step in ScoutPromptInput.steps(for: prompt) {
             try Task.checkCancellation()
-            guard ContinuousClock.now < deadline, focused(editor), value(editor) == typed else {
+            guard ContinuousClock.now < deadline else { throw ReviewLaunchError.scoutInputTimedOut }
+            guard focused(editor), value(editor) == typed.trimmingCharacters(in: .whitespacesAndNewlines) else {
                 throw ReviewLaunchError.scoutDraftChanged
             }
-            let end = prompt.index(cursor, offsetBy: 16, limitedBy: prompt.endIndex) ?? prompt.endIndex
-            let chunk = String(prompt[cursor..<end])
-            let characters = Array(chunk.utf16)
             // Target Scout's PID, not the global keyboard; never use the user's clipboard.
             for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else {
+                let lineBreak = step == .lineBreak
+                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: lineBreak ? 36 : 0, keyDown: down) else {
                     throw ReviewLaunchError.scoutControlUnavailable
                 }
-                event.flags = []
-                characters.withUnsafeBufferPointer { buffer in
-                    event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+                event.flags = lineBreak ? .maskShift : []
+                if case .text(let text) = step {
+                    let characters = Array(text.utf16)
+                    characters.withUnsafeBufferPointer { buffer in
+                        event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+                    }
                 }
                 event.postToPid(application.processIdentifier)
             }
-            typed += chunk
-            _ = try await wait(timeout: 2) { _ in value(editor) == typed }
-            cursor = end
+            typed += step.content
+            _ = try await wait(timeout: 2) { _ in value(editor) == typed.trimmingCharacters(in: .whitespacesAndNewlines) }
         }
         let ready = try await wait {
             $0.send.count == 1 && enabled($0.send[0]) && value(editor) == prompt && focused(editor)

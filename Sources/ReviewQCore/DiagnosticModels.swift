@@ -20,12 +20,14 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case settingsSaved, settingsFailed, patDeleted, patDeleteFailed
     case loginItemChanged, loginItemFailed, browserOpenFailed, applicationActionFailed, diagnosticsOpened
     case reviewLaunchStarted, reviewLaunchFinished, reviewLaunchFailed
+    case shortcutRegistered, shortcutPressed, shortcutRegistrationFailed, shortcutUnregistrationFailed
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
     case identity, projects, pullRequests, reviewHistory, reviews
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
     case scout, copilot
+    case shortcut
 }
 
 public enum DiagnosticReason: String, Codable, Sendable {
@@ -51,7 +53,7 @@ public struct DiagnosticFailure: Sendable {
             reason = .decoding
         } else if let error = error as? ReviewQError {
             switch error {
-            case .noSources, .invalidSource, .duplicateSource, .invalidTenant:
+            case .noSources, .invalidSource, .duplicateSource, .invalidTenant, .reviewPromptTooLong, .invalidReviewPrompt:
                 reason = .invalidConfiguration
             case .missingPAT: reason = .missingPAT
             case .invalidPAT: reason = .invalidPAT
