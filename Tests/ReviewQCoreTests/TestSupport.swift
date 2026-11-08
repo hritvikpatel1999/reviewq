@@ -68,14 +68,17 @@ func voteThreadJSON(
 
 func reviewCommentThreadJSON(
     author: String = reviewerID, type: String? = "text", deleted: Bool = false,
-    content: String = "", threadType: String? = nil
+    content: String = "", threadType: String? = nil,
+    statusJSON: String? = nil, threadDeleted: Bool = false
 ) -> String {
     let typeField = type.map { ",\"commentType\":\"\($0)\"" } ?? ""
     let threadTypeField = threadType.map {
         ",\"CodeReviewThreadType\":{\"$type\":\"System.String\",\"$value\":\"\($0)\"}"
     } ?? ""
+    let statusField = statusJSON.map { "\"status\":\($0)," } ?? ""
     return """
     {
+      \(statusField)"isDeleted":\(threadDeleted),
       "comments":[{"author":{"id":"\(author)"}\(typeField),"isDeleted":\(deleted),"content":"\(content)"}],
       "properties":{
         "Microsoft.TeamFoundation.Discussion.SupportsMarkdown":{"$type":"System.Int32","$value":1}\(threadTypeField)

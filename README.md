@@ -70,6 +70,37 @@ accurate Vision OCR layout checks remain native-only. Both actual Settings edito
 at 1,000/1,001 characters, including the Save button boundary, and the global shortcut was tested
 against the running native popover from another app.
 
+## Local comment-resolution enhancement (unreleased)
+
+The local app adds three comment-only labels using the existing PR thread response:
+
+- **Your comments are resolved** when every current discussion containing a non-deleted comment
+  from you is marked **Fixed**.
+- **You commented [2 resolved, 1 open]** when all relevant statuses are known and some discussions
+  remain **Active** or **Pending**. Counts are discussions, not individual replies; multiple replies
+  from you in one thread count once.
+- **You commented** when resolution totals cannot be stated reliably, including missing/unknown
+  statuses, other closure reasons (**Won't Fix**, **By Design**, **Closed**), or only deleted feedback.
+
+Deleted discussions and other reviewers' feedback do not affect the counts. Previous approval,
+suggestions, wait-for-author, or rejection votes retain their existing precedence.
+The count text stays on the existing metadata line and is included in accessibility labels and
+hover explanations. Thread status is not proof that a requested code change was made.
+
+There are **no additional HTTP calls, query parameters, authentication requests, or polling**.
+Resolution is calculated once per normal refresh from fields already returned by Azure DevOps;
+the UI does not refetch discussions when rendering or hovering.
+This enhancement is local and unreleased; it is not included in the published V2.1 release.
+
+An optimized comparison against published V2.1 used identical synthetic thread payloads and
+alternated baseline/candidate execution over nine paired samples. The extra classification work
+was approximately **0.0025 ms for 20 threads**, **0.027 ms for 200**, and **0.145 ms for 1,000**.
+Including JSON decoding, the 200-thread string-status workload added about **0.15 ms** to a
+roughly 46 ms baseline; other decoding differences were within timing noise, not evidence of a
+speedup. Each queued PR retains **24 additional bytes** for counts; the decoded thread stride
+remains unchanged, and no extra comment content is retained. These are local CPU measurements,
+not real-server latency or end-to-end UI benchmarks.
+
 ## Download version 2.1
 
 Download from the [ReviewQ v2.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.1.0).
@@ -217,7 +248,7 @@ your **last recorded nonzero vote**, not a current approval that no longer needs
 - **You Approved with Suggestions:** your last nonzero vote was Approved with suggestions (`5`).
 - **You Waited for Author:** your last nonzero vote was Waiting for author (`-5`).
 - **You Rejected:** your last nonzero vote was Rejected (`-10`).
-- **You Commented:** review comments, including recorded soft-deleted comments, were found
+- **You commented:** review comments, including recorded soft-deleted comments, were found
   but no nonzero vote from you was found.
 
 Vote resets (`0`) do not erase your prior feedback. Publication timestamps determine the latest

@@ -45,6 +45,36 @@ final class DashboardLayoutTests: XCTestCase {
         XCTAssertFalse(ReviewPullRequest.newestFirst(tieA, tieA))
     }
 
+    func testCommentResolutionLabelsStayBesideDraftWithoutAddingRowHeight() throws {
+        let counted = fixture(
+            stage: .commented, draft: true, required: true,
+            commentResolution: ReviewCommentResolution(resolvedCount: 2, openCount: 1)
+        )
+        let resolved = fixture(stage: .commentsResolved, draft: true, required: true)
+        let plain = fixture(stage: .commented, draft: true, required: true)
+        var heights: Set<Int> = []
+        for request in [counted, resolved, plain] {
+            let image = try render(
+                PullRequestRow(
+                    request: request, open: {}, openInEdge: {}, review: { _ in }, isLaunchingReview: false
+                ).frame(width: 392)
+            )
+            heights.insert(image.height)
+            let lines = try recognize(image, level: .fast)
+            if request.commentResolution != nil {
+                XCTAssertTrue(lines.contains {
+                    $0.contains("Draft") && $0.contains("You commented")
+                        && $0.contains("2 resolved") && $0.contains("1 open")
+                }, "\(lines)")
+            } else {
+                XCTAssertTrue(lines.contains {
+                    $0.contains("Draft") && $0.contains(request.reviewStageLabel)
+                }, "\(lines)")
+            }
+        }
+        XCTAssertEqual(heights.count, 1)
+    }
+
     func testDashboardRemovesFooterActionsButKeepsQuitAndRefreshTime() async throws {
         let name = "ReviewQ-layout-tests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -76,14 +106,15 @@ final class DashboardLayoutTests: XCTestCase {
 
     private func fixture(
         number: Int = 8675309, createdAt: TimeInterval = 1,
-        stage: ReviewStage = .firstReview, draft: Bool = false, required: Bool = false
+        stage: ReviewStage = .firstReview, draft: Bool = false, required: Bool = false,
+        commentResolution: ReviewCommentResolution? = nil
     ) -> ReviewPullRequest {
         ReviewPullRequest(
             number: number, title: "A compact pull request row", author: "A reviewer",
             organization: "example", project: "Project", repository: "Service", repositoryID: "service-id",
             createdAt: Date(timeIntervalSince1970: createdAt),
             url: URL(string: "https://dev.azure.com/example/Project/_git/service/pullrequest/\(number)")!,
-            isRequired: required, isDraft: draft, reviewStage: stage
+            isRequired: required, isDraft: draft, reviewStage: stage, commentResolution: commentResolution
         )
     }
 
@@ -131,9 +162,11 @@ final class DashboardLayoutTests: XCTestCase {
         return try XCTUnwrap(bitmap.cgImage)
     }
 
-    private func recognize(_ image: CGImage) throws -> [String] {
+    private func recognize(
+        _ image: CGImage, level: VNRequestTextRecognitionLevel = .accurate
+    ) throws -> [String] {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
+        request.recognitionLevel = level
         request.recognitionLanguages = ["en-US"]
         try VNImageRequestHandler(cgImage: image).perform([request])
         return try XCTUnwrap(request.results).map {

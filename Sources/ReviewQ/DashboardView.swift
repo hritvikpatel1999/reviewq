@@ -264,10 +264,15 @@ struct PullRequestRow: View {
                             Text("Required").font(.system(size: 10, weight: .medium))
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        if request.isDraft { Text("Draft").font(.caption2).foregroundStyle(.secondary) }
-                        Text(request.reviewStage.label).font(.caption2).foregroundStyle(.secondary)
-                            .help(request.reviewStage.explanation)
+                        if request.isDraft {
+                            Text("Draft").font(.caption2).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        Text(request.reviewStageLabel).font(.caption2).foregroundStyle(.secondary)
+                            .lineLimit(1).minimumScaleFactor(0.85)
+                            .help(request.reviewStageExplanation)
                         Spacer(minLength: 84)
                     }
                     .frame(height: 22)
@@ -285,7 +290,7 @@ struct PullRequestRow: View {
                 .contentShape(RoundedRectangle(cornerRadius: 9))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Pull request: \(request.title), by \(request.author), \(request.reviewStage.label)")
+            .accessibilityLabel("Pull request: \(request.title), by \(request.author), \(request.reviewStageLabel)")
             .help("Open pull request in your browser")
 
             HStack(spacing: 6) {

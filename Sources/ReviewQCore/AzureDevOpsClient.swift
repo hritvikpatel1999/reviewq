@@ -250,8 +250,11 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
         if let continuation = response.continuationToken, !continuation.isEmpty {
             throw ReviewQError.invalidPagination(scope)
         }
-        let stage = try ReviewStage.fromHistory(threads.value, reviewerID: reviewerID)
-        return try request.review(source: source, reviewer: candidate.reviewer, stage: stage)
+        let history = try ReviewStage.fromHistory(threads.value, reviewerID: reviewerID)
+        return try request.review(
+            source: source, reviewer: candidate.reviewer,
+            stage: history.stage, commentResolution: history.commentResolution
+        )
     }
 
     private func get<Value: Decodable & Sendable>(
