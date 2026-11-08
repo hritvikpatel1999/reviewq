@@ -10,6 +10,7 @@ enum ReviewQApp {
     static func main() {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
+        application.mainMenu = makeMainMenu()
         let logger = DiagnosticLogger(
             directory: DiagnosticLogger.defaultDirectory,
             verboseEnabled: UserDefaults.standard.bool(forKey: DiagnosticLogger.verboseKey)
@@ -18,6 +19,31 @@ enum ReviewQApp {
         let delegate = AppDelegate(store: ReviewStore(diagnostics: logger), diagnostics: diagnostics)
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
+    }
+
+    @MainActor
+    static func makeMainMenu() -> NSMenu {
+        let menu = NSMenu()
+        let applicationMenu = NSMenu(title: "ReviewQ")
+        applicationMenu.addItem(
+            withTitle: "Quit ReviewQ", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
+        )
+        let applicationItem = menu.addItem(withTitle: "ReviewQ", action: nil, keyEquivalent: "")
+        applicationItem.submenu = applicationMenu
+
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: NSSelectorFromString("undo:"), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: NSSelectorFromString("redo:"), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+        return menu
     }
 }
 

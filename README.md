@@ -4,7 +4,7 @@
 
 A standalone native macOS menu-bar app for Azure DevOps pull requests that need your review.
 ReviewQ does not require SwiftBar, LeetBar, or AppFoundations at build time or runtime.
-Version 2.1 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
+Version 2.2 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
 future version, not included in this release.
 
 ## Features
@@ -15,12 +15,13 @@ future version, not included in this release.
 - Separate Scout/Copilot review instructions, with a 1,000-character limit per app.
 - Command-Option-Q to open or close the menu-bar queue from any app.
 - First Review, You Approved, You Approved with Suggestions, You Waited for Author, You Rejected,
-  and You Commented labels based on your recorded review history.
+  and comment-resolution labels based on your recorded review history.
 - Multiple Azure DevOps organizations and projects.
 - Automatic refresh (1, 5, 15, or 30 minutes), manual refresh, and refresh after wake.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
 - Optional personal access token stored only in macOS Keychain.
 - Settings, optional draft PRs, and launch at login.
+- Native Select All, Copy, Paste, Cut, Undo, and Redo shortcuts in Settings.
 - Visible authentication/network errors; failed refreshes never masquerade as an empty queue.
 - Local diagnostics with opt-in verbose logging, correlated request outcomes, and private ZIP exports.
 
@@ -34,7 +35,8 @@ future version, not included in this release.
 - Show PR age without the redundant "old" suffix.
 
 Existing settings, saved PATs, launch-at-login identity, and diagnostics are preserved.
-The [version 2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.0.0) and
+The [version 2.1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.1.0),
+[version 2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.0.0) and
 [version 1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v1.0.0) remain available.
 
 ## What's new in version 2.1
@@ -70,9 +72,13 @@ accurate Vision OCR layout checks remain native-only. Both actual Settings edito
 at 1,000/1,001 characters, including the Save button boundary, and the global shortcut was tested
 against the running native popover from another app.
 
-## Local comment-resolution enhancement (unreleased)
+## What's new in version 2.2
 
-The local app adds three comment-only labels using the existing PR thread response:
+Version **2.2.0 / build 4** adds comment-resolution labels and native Settings editing shortcuts.
+
+### Comment-resolution labels
+
+ReviewQ shows three comment-only labels using the existing PR thread response:
 
 - **Your comments are resolved** when every current discussion containing a non-deleted comment
   from you is marked **Fixed**.
@@ -90,7 +96,6 @@ hover explanations. Thread status is not proof that a requested code change was 
 There are **no additional HTTP calls, query parameters, authentication requests, or polling**.
 Resolution is calculated once per normal refresh from fields already returned by Azure DevOps;
 the UI does not refetch discussions when rendering or hovering.
-This enhancement is local and unreleased; it is not included in the published V2.1 release.
 
 An optimized comparison against published V2.1 used identical synthetic thread payloads and
 alternated baseline/candidate execution over nine paired samples. The extra classification work
@@ -101,15 +106,27 @@ speedup. Each queued PR retains **24 additional bytes** for counts; the decoded 
 remains unchanged, and no extra comment content is retained. These are local CPU measurements,
 not real-server latency or end-to-end UI benchmarks.
 
-## Download version 2.1
+### Settings keyboard shortcuts
 
-Download from the [ReviewQ v2.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.1.0).
+ReviewQ installs native Edit commands so **Command-A**, **Command-C**, and **Command-V**
+work in Settings text fields and multiline editors. Standard Cut, Undo, and Redo shortcuts are
+also available. Commands follow the focused control's native responder chain; secure PAT fields
+keep macOS restrictions on copying secrets. **Command-Option-Q** still toggles the menu-bar queue.
+
+Version 2.2.0 release validation passed **122 native tests** and **119 Intel/Rosetta tests**.
+The three accurate Vision OCR checks remain native-only. Editing tests cover single-line and
+multiline inputs, secure-field copy restrictions, and Undo/Redo. Native Command-A was also
+verified in all four actual Settings inputs, and the global shortcut opened and closed the live queue.
+
+## Download version 2.2
+
+Download from the [ReviewQ v2.2.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.2.0).
 The repository is private, so you must sign into a GitHub account with access.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-2.1.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-2.1.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-2.2.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-2.2.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -123,7 +140,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 2.1 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 2.2 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -241,15 +258,20 @@ beside Draft when applicable, without adding another row. Quit sits immediately 
 is available from the header's gear icon. The redundant bottom action row has been removed.
 
 The queue still includes only assigned active PRs that currently need your vote. Statuses describe
-your **last recorded nonzero vote**, not a current approval that no longer needs review:
+your **last recorded nonzero vote**, or your comment history when no nonzero vote was found,
+not a current approval that no longer needs review:
 
 - **First Review:** no previous nonzero vote or regular review comment from you was found.
 - **You Approved:** your last nonzero vote was Approved (`10`).
 - **You Approved with Suggestions:** your last nonzero vote was Approved with suggestions (`5`).
 - **You Waited for Author:** your last nonzero vote was Waiting for author (`-5`).
 - **You Rejected:** your last nonzero vote was Rejected (`-10`).
+- **Your comments are resolved:** every current discussion containing a non-deleted comment
+  from you is marked Fixed.
+- **You commented [2 resolved, 1 open]:** all relevant discussion statuses are known and at least
+  one discussion remains Active or Pending.
 - **You commented:** review comments, including recorded soft-deleted comments, were found
-  but no nonzero vote from you was found.
+  but no nonzero vote was found and resolution totals cannot be stated reliably.
 
 Vote resets (`0`) do not erase your prior feedback. Publication timestamps determine the latest
 vote, with thread IDs breaking same-time ties; comment edits and API response order do not
