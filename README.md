@@ -121,7 +121,7 @@ verified in all four actual Settings inputs, and the global shortcut opened and 
 ## Download version 2.2
 
 Download from the [ReviewQ v2.2.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.2.0).
-The repository is private, so you must sign into a GitHub account with access.
+The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
@@ -146,6 +146,22 @@ other macOS security protections. Only use macOS's per-app approval if you have 
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
 Checksums verify that your download matches the release asset, not Apple's approval of its publisher.
 Intel builds are exercised under Rosetta on Apple Silicon, not on physical Intel hardware.
+
+## Contributing
+
+Changes to `main` must go through a pull request.
+[CODEOWNERS](.github/CODEOWNERS) assigns every path, including the ownership file itself, to
+[@hritvikpatel1999](https://github.com/hritvikpatel1999). GitHub branch protection requires their
+approving review before merging, and new commits dismiss previous approvals.
+
+The rules also apply to administrators. Direct pushes, force pushes, and branch deletion are
+disabled. The ownership file alone does not enforce these requirements; GitHub's protection
+settings for `main` must remain enabled.
+
+GitHub does not allow authors to approve their own pull requests. Under this strict no-bypass
+policy, owner-authored pull requests also remain blocked until the protection policy is
+deliberately changed. A general admin bypass is not enabled because GitHub cannot restrict
+that bypass to owner-authored pull requests.
 
 ## Build and open
 
