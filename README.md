@@ -181,17 +181,18 @@ Intel builds are exercised under Rosetta on Apple Silicon, not on physical Intel
 
 Changes to `main` must go through a pull request.
 [CODEOWNERS](.github/CODEOWNERS) assigns every path, including the ownership file itself, to
-[@hritvikpatel1999](https://github.com/hritvikpatel1999). GitHub branch protection requires their
-approving review before merging, and new commits dismiss previous approvals.
+[@hritvikpatel1999](https://github.com/hritvikpatel1999). For other contributors, the
+[active ruleset](https://github.com/hritvikpatel1999/reviewq/rules/26963593) requires their
+approving review before merging; new commits dismiss previous approvals.
 
-The rules also apply to administrators. Direct pushes, force pushes, and branch deletion are
-disabled. The ownership file alone does not enforce these requirements; GitHub's protection
-settings for `main` must remain enabled.
+The owner can explicitly bypass review requirements while merging a pull request, including their
+own: GitHub does not allow authors to approve their own pull requests. This is a **pull-request-only**
+bypass, not permission to push directly, force-push, or delete `main`. Those operations remain blocked.
 
-GitHub does not allow authors to approve their own pull requests. Under this strict no-bypass
-policy, owner-authored pull requests also remain blocked until the protection policy is
-deliberately changed. A general admin bypass is not enabled because GitHub cannot restrict
-that bypass to owner-authored pull requests.
+GitHub implements the exception through its repository Admin role. In this personal repository,
+that role belongs only to the owner, `hritvikpatel1999`; recheck the bypass before changing ownership
+or administrator access. The ownership file alone does not enforce these requirements, so the
+ruleset for `main` must remain active.
 
 ## Build and open
 

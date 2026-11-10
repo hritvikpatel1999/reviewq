@@ -15,6 +15,7 @@ It does not add GitHub integration, a My PRs view, or PR-writing/merge actions.
 | Persist resolved identities for seven days and definitive no-matches for fifteen minutes. | Stable IDs do not need re-resolution on every refresh, but email mappings can change. | Hour-long positive TTLs were rejected in the preceding caching discussion. | Account/tenant/source/email context isolates entries. PR lists and history are not cached across refreshes. |
 | Keep explicit identity re-lookup separate from saving Settings. | Switching accounts or reassigning an email needs an immediate escape hatch without changing a draft. | Making ordinary Refresh clear identities would defeat caching. | The loader invalidates its own cache and credentials; superseded lookups cannot repopulate cleared entries. |
 | Preserve saved intervals and internal app identity. | Existing settings, Keychain access, diagnostics, and login identity must survive the update. | A saved five-minute choice is not automatically migrated. | Only new configurations default to fifteen minutes; bundle ID remains `dev.prbar.app`. |
+| Allow the repository owner to bypass approval through pull requests only. | The owner requested a merge bypass because GitHub forbids self-approval. | A general administrator bypass would also permit direct pushes; temporarily waiving all reviews would not provide the requested ongoing exception. | The active GitHub ruleset uses the Admin role, verified to contain only the personal-repository owner. Other contributors still need a code-owner review, and direct pushes, force pushes, and deletion remain blocked. |
 
 ## Key Flows
 
@@ -36,6 +37,15 @@ It does not add GitHub integration, a My PRs view, or PR-writing/merge actions.
 4. Query active PRs by creator, excluding IDs already included before fetching additional history.
 5. Publish one deduplicated, newest-first snapshot. Any failure retains the previous successful queue.
 6. Show followed-only cards below repositories in a collapsible section with `{author} in {repo-name}`.
+
+### Repository-owner merge bypass
+
+1. All changes to `main`, including the owner's, must arrive through a pull request.
+2. Other contributors need one approving code-owner review; new commits dismiss stale approvals.
+3. The owner can explicitly bypass approval when merging a PR, but cannot bypass direct-push,
+   force-push, or branch-deletion restrictions.
+4. The replacement GitHub ruleset is activated and verified before retiring classic protection.
+   The ownership file remains unchanged; this does not add merge actions to the app.
 
 ## FAQs
 
@@ -68,4 +78,8 @@ when using a PAT. Scout cold-launch limitations and normal macOS approval requir
 Disable following to restore the assigned-only request flow, or use Refresh identities to discard
 stale mappings. Existing Diagnostics reports safe failure categories. Installing the previous
 v2.2.0 release preserves the existing configuration/PAT identity; its decoder ignores the new
-settings fields. No branch protection changes are part of this PR.
+settings fields.
+
+The GitHub ruleset is configured separately from these files. Removing its PR-only owner bypass
+restores the previous strict review policy, including the self-approval deadlock. Keep the ruleset
+active to preserve mandatory PRs and the restrictions on direct pushes, force pushes, and deletion.
