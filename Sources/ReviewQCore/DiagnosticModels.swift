@@ -17,6 +17,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case authenticationStarted, authenticationFinished, authenticationFailed, authenticationCancelled
     case refreshStarted, refreshFinished, refreshFailed, refreshCancelled
     case requestStarted, requestFinished, requestFailed, requestCancelled
+    case identityCacheHit, identityCacheMiss, identityCacheCleared, identityCacheInvalidated
     case settingsSaved, settingsFailed, patDeleted, patDeleteFailed
     case loginItemChanged, loginItemFailed, browserOpenFailed, applicationActionFailed, diagnosticsOpened
     case reviewLaunchStarted, reviewLaunchFinished, reviewLaunchFailed
@@ -24,7 +25,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
-    case identity, projects, pullRequests, reviewHistory, reviews
+    case identity, followedIdentity, identityCache, projects, pullRequests, reviewHistory, reviews
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
     case scout, copilot
     case shortcut
@@ -53,7 +54,8 @@ public struct DiagnosticFailure: Sendable {
             reason = .decoding
         } else if let error = error as? ReviewQError {
             switch error {
-            case .noSources, .invalidSource, .duplicateSource, .invalidTenant, .reviewPromptTooLong, .invalidReviewPrompt:
+            case .noSources, .invalidSource, .duplicateSource, .invalidTenant, .reviewPromptTooLong, .invalidReviewPrompt,
+                 .invalidFollowedAuthorEmails, .unresolvedFollowedAuthors:
                 reason = .invalidConfiguration
             case .missingPAT: reason = .missingPAT
             case .invalidPAT: reason = .invalidPAT

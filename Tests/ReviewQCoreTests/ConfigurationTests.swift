@@ -3,6 +3,15 @@ import Foundation
 import XCTest
 
 final class ConfigurationTests: XCTestCase {
+    func testNewConfigurationDefaultsToFifteenMinutesAndSavedFiveMinutesSurvive() throws {
+        XCTAssertEqual(ReviewConfiguration().refreshInterval, .fifteenMinutes)
+        var saved = configuration()
+        saved.refreshInterval = .fiveMinutes
+        let decoded = try JSONDecoder().decode(ReviewConfiguration.self, from: JSONEncoder().encode(saved))
+        XCTAssertEqual(decoded.refreshInterval, .fiveMinutes)
+        XCTAssertEqual(decoded.refreshInterval.rawValue, 300)
+    }
+
     func testModernAndLegacySourcesNormalize() throws {
         let modern = try ReviewSource.parse("https://dev.azure.com/example/Project%20Name/")
         let legacy = try ReviewSource.parse("https://example.visualstudio.com/DefaultCollection/Project%20Name")
@@ -139,5 +148,79 @@ final class ConfigurationTests: XCTestCase {
         }
         XCTAssertEqual(DiagnosticFailure(ReviewQError.reviewPromptTooLong).reason, .invalidConfiguration)
         XCTAssertEqual(DiagnosticFailure(ReviewQError.invalidReviewPrompt).reason, .invalidConfiguration)
+    }
+
+    func testFollowingDefaultsOffAndMigratesMissingKeysWithoutChangingExistingSettings() throws {
+        var original = configuration()
+        original.scoutAdditionalInstructions = "Keep these instructions."
+        original.includeDrafts = true
+        XCTAssertFalse(original.followPeople)
+        XCTAssertEqual(try original.validatedFollowedAuthors(), [])
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any]
+        )
+        object.removeValue(forKey: "followPeople")
+        object.removeValue(forKey: "followedAuthorEmails")
+        XCTAssertEqual(
+            try JSONDecoder().decode(ReviewConfiguration.self, from: JSONSerialization.data(withJSONObject: object)),
+            original
+        )
+        let invalidValues: [(String, Any)] = [
+            ("followPeople", "true"), ("followPeople", NSNull()),
+            ("followedAuthorEmails", true), ("followedAuthorEmails", NSNull())
+        ]
+        for (key, value) in invalidValues {
+            var invalid = object
+            invalid[key] = value
+            XCTAssertThrowsError(
+                try JSONDecoder().decode(ReviewConfiguration.self, from: JSONSerialization.data(withJSONObject: invalid))
+            )
+        }
+    }
+
+    func testFollowedEmailsAreSemicolonSeparatedCaseInsensitiveAndDeduplicated() throws {
+        var settings = configuration()
+        settings.followPeople = true
+        settings.followedAuthorEmails = "Alex+reviews@Example.com;sam@example.co.uk;ALEX+REVIEWS@example.com"
+        XCTAssertEqual(try settings.validatedFollowedAuthors(), ["alex+reviews@example.com", "sam@example.co.uk"])
+        let restored = try JSONDecoder().decode(ReviewConfiguration.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(restored, settings, "Preserve the user's textbox contents while normalizing lookup keys.")
+    }
+
+    func testIdentityEmailLookupEncodesPlusLiterallyInsteadOfAsAFormSpace() throws {
+        let url = try AzureDevOpsURL.make(
+            organization: "example", path: ["_apis", "identities"],
+            query: [URLQueryItem(name: "filterValue", value: "alex+reviews@example.com")],
+            identityService: true
+        )
+        XCTAssertEqual(url.host, "vssps.dev.azure.com")
+        XCTAssertTrue(url.absoluteString.contains("alex%2Breviews"))
+        let query = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(query.first?.value, "alex+reviews@example.com")
+    }
+
+    func testInvalidFollowedEmailListsAreRejectedOnlyWhenEnabled() throws {
+        for text in [
+            "", " ", "alex@example.com; sam@example.com", "alex@example.com;",
+            ";alex@example.com", "alex@example.com;;sam@example.com",
+            "alex@example.com,sam@example.com", "Alex <alex@example.com>",
+            "alex@example.com\n", "alex\n@example.com", "alex@example.com\t",
+            "alex\u{a0}@example.com", "alex@\u{0}example.com",
+            "alex", "@example.com", "alex@", "alex@@example.com",
+            "alex@localhost", ".alex@example.com", "alex.@example.com",
+            "al..ex@example.com", "alex@-example.com", "alex@example-.com",
+            "\(String(repeating: "a", count: 65))@example.com",
+            "alex@\(String(repeating: "a", count: 64)).com"
+        ] {
+            var settings = configuration()
+            settings.followedAuthorEmails = text
+            XCTAssertEqual(try settings.validatedFollowedAuthors(), [], text)
+            settings.followPeople = true
+            XCTAssertThrowsError(try settings.validatedSources(), text) {
+                XCTAssertEqual($0.localizedDescription, ReviewQError.invalidFollowedAuthorEmails.localizedDescription)
+            }
+        }
+        XCTAssertEqual(DiagnosticFailure(ReviewQError.invalidFollowedAuthorEmails).reason, .invalidConfiguration)
+        XCTAssertEqual(DiagnosticFailure(ReviewQError.unresolvedFollowedAuthors([])).reason, .invalidConfiguration)
     }
 }

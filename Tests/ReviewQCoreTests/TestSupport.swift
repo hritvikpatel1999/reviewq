@@ -19,15 +19,19 @@ func connectionResponse(_ id: String = reviewerID) -> HTTPResult {
 func pullRequestJSON(
     number: Int = 1, vote: Int = 0, draft: Bool = false, status: String = "active",
     reviewer: String = reviewerID, author: String = authorID,
-    declined: Bool = false, date: String = "2026-10-01T12:30:00.1234567Z"
+    declined: Bool = false, date: String = "2026-10-01T12:30:00.1234567Z",
+    hasReviewer: Bool = true, repository: String = "Repository", repositoryID: String = "repo-id",
+    project: String = "Project"
 ) -> String {
-    """
+    let reviewers = hasReviewer
+        ? #"{"id":"\#(reviewer)","vote":\#(vote),"isRequired":true,"hasDeclined":\#(declined)}"# : ""
+    return """
     {
       "pullRequestId":\(number),"title":"Review fixture \(number)","status":"\(status)",
       "creationDate":"\(date)","isDraft":\(draft),
       "createdBy":{"id":"\(author)","displayName":"Fixture author"},
-      "repository":{"id":"repo-id","name":"Repository","project":{"id":"project-id","name":"Project"}},
-      "reviewers":[{"id":"\(reviewer)","vote":\(vote),"isRequired":true,"hasDeclined":\(declined)}]
+      "repository":{"id":"\(repositoryID)","name":"\(repository)","project":{"id":"project-id","name":"\(project)"}},
+      "reviewers":[\(reviewers)]
     }
     """
 }
@@ -38,6 +42,30 @@ func pullRequestsResponse(_ items: [String], status: Int = 200) -> HTTPResult {
 
 func reviewThreadsResponse(_ items: [String] = [], status: Int = 200) -> HTTPResult {
     HTTPResult(data: Data("{\"value\":[\(items.joined(separator: ","))]}".utf8), status: status)
+}
+
+func followedIdentityJSON(
+    email: String = "alex@example.com", id: String = authorID,
+    account: String? = nil, active: Bool = true, group: Bool = false
+) -> String {
+    """
+    {"id":"\(id)","isActive":\(active),"isContainer":\(group),
+     "properties":{"Mail":{"$value":"\(email)"},"Account":{"$value":"\(account ?? email)"}}}
+    """
+}
+
+func identitiesResponse(_ items: [String], continuation: String? = nil) -> HTTPResult {
+    HTTPResult(
+        data: Data("{\"value\":[\(items.joined(separator: ","))]}".utf8),
+        status: 200, continuationToken: continuation
+    )
+}
+
+func projectsResponse(_ names: [String]) -> HTTPResult {
+    HTTPResult(
+        data: Data("{\"value\":[\(names.map { #"{"id":"\#($0.lowercased())","name":"\#($0)"}"# }.joined(separator: ","))]}".utf8),
+        status: 200
+    )
 }
 
 func voteThreadJSON(
@@ -117,9 +145,14 @@ actor StubTransport: HTTPTransport {
 actor StubAuthorization: AuthorizationProviding {
     private(set) var calls = 0
     private(set) var invalidations = 0
+    private var fixedHeader: String?
+
+    init(header: String? = nil) { fixedHeader = header }
+    func setHeader(_ header: String) { fixedHeader = header }
 
     func authorization(for configuration: ReviewConfiguration) -> String {
         calls += 1
+        if let fixedHeader { return fixedHeader }
         return "Bearer fixture-\(calls)"
     }
 
@@ -149,6 +182,9 @@ actor StubCommandRunner: CommandRunning {
 }
 
 actor StubReviewLoader: ReviewLoading {
+    private(set) var identityInvalidations = 0
+    func invalidateIdentityCache() { identityInvalidations += 1 }
+
     enum Outcome: Sendable {
         case success(ReviewSnapshot)
         case failure(ReviewQError)
@@ -170,6 +206,8 @@ actor StubReviewLoader: ReviewLoading {
 }
 
 actor DeferredReviewLoader: ReviewLoading {
+    func invalidateIdentityCache() {}
+
     private var pending: CheckedContinuation<ReviewSnapshot, any Error>?
     private var started: CheckedContinuation<Void, Never>?
 

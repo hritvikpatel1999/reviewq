@@ -76,9 +76,77 @@ final class RepositoryDropdownTests: XCTestCase {
         XCTAssertGreaterThan(host.intrinsicContentSize.height, originalHeight + 100)
     }
 
+    func testPeopleSectionStartsCollapsedAndHeaderTogglesItsReviews() async throws {
+        let state = DropdownState()
+        let requests = try [request(number: 2, isFollowedOnly: true), request(number: 1, isFollowedOnly: true)]
+        let (host, window) = makeHost(PeopleDropdownHarness(requests: requests, state: state))
+        defer { window.close() }
+        try await settle(host)
+        let collapsedHeight = host.intrinsicContentSize.height
+        XCTAssertGreaterThan(collapsedHeight, 0)
+        XCTAssertFalse(state.isExpanded)
+
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+        let expandedHeight = host.intrinsicContentSize.height
+        XCTAssertGreaterThan(expandedHeight, collapsedHeight + 100)
+        let rowHeight = (expandedHeight - collapsedHeight - 10 - 6) / 2
+        let header = headerCenter(in: host, collapsedHeight: collapsedHeight)
+        let direction: CGFloat = host.isFlipped ? 1 : -1
+        try click(NSPoint(
+            x: header.x, y: header.y + direction * (collapsedHeight / 2 - 12 + 10 + rowHeight / 2)
+        ), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(state.openedRequest, requests.first?.id)
+
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        XCTAssertFalse(state.isExpanded)
+        XCTAssertEqual(host.intrinsicContentSize.height, collapsedHeight, accuracy: 1)
+    }
+
+    func testPeopleExpansionSurvivesRefreshAndReopeningAndCollapsedStateSurvivesRefresh() async throws {
+        let state = DropdownState()
+        let original = try [request(number: 1, isFollowedOnly: true)]
+        let (host, window) = makeHost(PeopleDropdownHarness(requests: original, state: state))
+        defer { window.close() }
+        try await settle(host)
+        let collapsedHeight = host.intrinsicContentSize.height
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        let originalHeight = host.intrinsicContentSize.height
+        let refreshed = try [
+            request(number: 3, isFollowedOnly: true), request(number: 2, isFollowedOnly: true),
+            request(number: 1, isFollowedOnly: true)
+        ]
+        host.rootView = PeopleDropdownHarness(requests: refreshed, state: state)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+        XCTAssertGreaterThan(host.intrinsicContentSize.height, originalHeight + 100)
+        window.orderOut(nil)
+        window.makeKeyAndOrderFront(nil)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        XCTAssertFalse(state.isExpanded)
+        host.rootView = PeopleDropdownHarness(requests: original, state: state)
+        try await settle(host)
+        XCTAssertFalse(state.isExpanded)
+        XCTAssertEqual(host.intrinsicContentSize.height, collapsedHeight, accuracy: 1)
+    }
+
     func testPRIconsDispatchIndependentlyAndDoNotOpenTheBrowserForAIReviews() async throws {
+        for isFollowedOnly in [false, true] {
+            try await exercisePRCardActions(isFollowedOnly: isFollowedOnly)
+        }
+    }
+
+    private func exercisePRCardActions(isFollowedOnly: Bool) async throws {
         _ = NSApplication.shared
-        let request = try request(number: 42)
+        let request = try request(number: 42, isFollowedOnly: isFollowedOnly)
         var opened = 0
         var edgeOpened = 0
         var assistants: [ReviewAssistant] = []
@@ -132,7 +200,8 @@ final class RepositoryDropdownTests: XCTestCase {
     }
 
     private func request(
-        number: Int, organization: String = "example", repository: String = "Service"
+        number: Int, organization: String = "example", repository: String = "Service",
+        isFollowedOnly: Bool = false
     ) throws -> ReviewPullRequest {
         ReviewPullRequest(
             number: number, title: "Synthetic review \(number)", author: "Fixture author",
@@ -140,7 +209,7 @@ final class RepositoryDropdownTests: XCTestCase {
             repository: repository, repositoryID: repository.lowercased(),
             createdAt: Date(timeIntervalSince1970: TimeInterval(number)),
             url: try XCTUnwrap(URL(string: "https://dev.azure.com/\(organization)/Project/_git/repo/pullrequest/\(number)")),
-            isRequired: false, isDraft: false, reviewStage: .firstReview
+            isRequired: false, isDraft: false, reviewStage: .firstReview, isFollowedOnly: isFollowedOnly
         )
     }
 
@@ -198,8 +267,12 @@ final class RepositoryDropdownTests: XCTestCase {
     private func makeHost(
         group: RepositoryGroup, state: DropdownState
     ) -> (NSHostingView<DropdownHarness>, NSWindow) {
+        makeHost(DropdownHarness(group: group, state: state))
+    }
+
+    private func makeHost<Content: View>(_ view: Content) -> (NSHostingView<Content>, NSWindow) {
         _ = NSApplication.shared
-        let host = NSHostingView(rootView: DropdownHarness(group: group, state: state))
+        let host = NSHostingView(rootView: view)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: 640),
             styleMask: [.borderless], backing: .buffered, defer: false
@@ -257,6 +330,21 @@ private struct DropdownHarness: View {
     var body: some View {
         RepositoryDropdown(
             group: group, isExpanded: $state.isExpanded,
+            open: { state.openedRequest = $0.id }, openInEdge: { _ in },
+            review: { _, _ in }, isLaunchingReview: false
+        )
+        .frame(width: 416)
+    }
+
+}
+
+private struct PeopleDropdownHarness: View {
+    let requests: [ReviewPullRequest]
+    @ObservedObject var state: DropdownState
+
+    var body: some View {
+        FollowedPeopleSection(
+            requests: requests, isExpanded: $state.isExpanded,
             open: { state.openedRequest = $0.id }, openInEdge: { _ in },
             review: { _, _ in }, isLaunchingReview: false
         )

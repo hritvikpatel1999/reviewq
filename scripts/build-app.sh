@@ -23,6 +23,11 @@ if [ -L "$ROOT/dist" ]; then
 fi
 cd "$ROOT"
 plutil -lint "$ROOT/Support/Info.plist"
+ICON_NAME="$(plutil -extract CFBundleIconFile raw -o - "$ROOT/Support/Info.plist")"
+if [ "$ICON_NAME" != "AppIcon" ] || [ ! -s "$ROOT/Support/$ICON_NAME.icns" ] || [ -L "$ROOT/Support/$ICON_NAME.icns" ]; then
+    printf 'The checked-in AppIcon.icns resource is missing or invalid.\n' >&2
+    exit 1
+fi
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$ROOT/Support/Info.plist")"
 if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     printf 'The bundle release version must have the form major.minor.patch.\n' >&2
@@ -54,7 +59,7 @@ build_app() (
         FILES="$(find "$APP_DIR" -type f -print)"
         while IFS= read -r FILE; do
             case "$FILE" in
-                ""|"$APP_DIR/Contents/MacOS/ReviewQ"|"$APP_DIR/Contents/Info.plist"|"$APP_DIR/Contents/_CodeSignature/CodeResources") ;;
+                ""|"$APP_DIR/Contents/MacOS/ReviewQ"|"$APP_DIR/Contents/Info.plist"|"$APP_DIR/Contents/Resources/AppIcon.icns"|"$APP_DIR/Contents/_CodeSignature/CodeResources") ;;
                 *) printf 'The existing app output contains unexpected files; refusing to package them.\n' >&2; exit 1 ;;
             esac
         done <<EOF
@@ -69,8 +74,10 @@ EOF
     swift build -c release --arch "$ARCH" --product ReviewQ
     BIN_DIR="$(swift build -c release --arch "$ARCH" --show-bin-path)"
     mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-    cp "$BIN_DIR/ReviewQ" "$APP_DIR/Contents/MacOS/ReviewQ"
+    # A new inode avoids stale code-signing pages from a previously launched app.
+    install -S -m 755 "$BIN_DIR/ReviewQ" "$APP_DIR/Contents/MacOS/ReviewQ"
     cp "$ROOT/Support/Info.plist" "$APP_DIR/Contents/Info.plist"
+    install -S -m 644 "$ROOT/Support/$ICON_NAME.icns" "$APP_DIR/Contents/Resources/$ICON_NAME.icns"
     ACTUAL_ARCH="$(lipo -archs "$APP_DIR/Contents/MacOS/ReviewQ")"
     if [ "$ACTUAL_ARCH" != "$ARCH" ]; then
         printf 'Expected %s executable, received %s.\n' "$ARCH" "$ACTUAL_ARCH" >&2
@@ -78,6 +85,8 @@ EOF
     fi
     codesign --force --sign - --options runtime "$APP_DIR"
     codesign --verify --strict "$APP_DIR"
+    # Existing bundles need a new timestamp to invalidate cached launcher icons.
+    touch "$APP_DIR"
     printf '\nBuilt %s (%s)\n' "$APP_DIR" "$ARCH"
 )
 

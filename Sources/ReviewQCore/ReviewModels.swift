@@ -19,13 +19,22 @@ public enum ReviewStage: String, CaseIterable, Sendable {
 
     public var explanation: String {
         switch self {
+        case .approved, .approvedWithSuggestions, .waitedForAuthor, .rejected:
+            "\(historyExplanation) This PR needs your vote again."
+        default:
+            historyExplanation
+        }
+    }
+
+    var historyExplanation: String {
+        switch self {
         case .firstReview: "No previous nonzero vote or review comment from you was found."
-        case .approved: "Your last recorded nonzero vote was Approved. This PR needs your vote again."
+        case .approved: "Your last recorded nonzero vote was Approved."
         case .approvedWithSuggestions:
-            "Your last recorded nonzero vote was Approved with suggestions. This PR needs your vote again."
+            "Your last recorded nonzero vote was Approved with suggestions."
         case .waitedForAuthor:
-            "Your last recorded nonzero vote was Waiting for author. This PR needs your vote again."
-        case .rejected: "Your last recorded nonzero vote was Rejected. This PR needs your vote again."
+            "Your last recorded nonzero vote was Waiting for author."
+        case .rejected: "Your last recorded nonzero vote was Rejected."
         case .commented: "You previously left a review comment, but no nonzero vote from you was found."
         case .commentsResolved: "All your current review discussion threads are marked Fixed."
         }
@@ -114,12 +123,13 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
     public let isDraft: Bool
     public let reviewStage: ReviewStage
     public let commentResolution: ReviewCommentResolution?
+    public let isFollowedOnly: Bool
 
     public init(
         number: Int, title: String, author: String, organization: String, project: String,
         repository: String, repositoryID: String, createdAt: Date, url: URL,
         isRequired: Bool, isDraft: Bool, reviewStage: ReviewStage,
-        commentResolution: ReviewCommentResolution? = nil
+        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false
     ) {
         self.number = number
         self.title = title
@@ -134,10 +144,16 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
         self.isDraft = isDraft
         self.reviewStage = reviewStage
         self.commentResolution = commentResolution
+        self.isFollowedOnly = isFollowedOnly
     }
 
-    public var id: String { "\(organization.lowercased())/\(repositoryID.lowercased())/\(number)" }
+    public var id: String { Self.identifier(organization: organization, repositoryID: repositoryID, number: number) }
     public var groupID: String { "\(organization)/\(project)/\(repository)" }
+    public var authorLabel: String { isFollowedOnly ? "\(author) in \(repository)" : author }
+
+    static func identifier(organization: String, repositoryID: String, number: Int) -> String {
+        "\(organization.lowercased())/\(repositoryID.lowercased())/\(number)"
+    }
 
     public var reviewStageLabel: String {
         guard reviewStage == .commented, let commentResolution else { return reviewStage.label }
@@ -145,11 +161,12 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
     }
 
     public var reviewStageExplanation: String {
+        let explanation = isFollowedOnly ? reviewStage.historyExplanation : reviewStage.explanation
         if let commentResolution {
-            return "\(reviewStage.explanation)\n\(commentResolution.summary). Counts refer to discussion threads, not individual replies."
+            return "\(explanation)\n\(commentResolution.summary). Counts refer to discussion threads, not individual replies."
         }
-        guard reviewStage == .commented else { return reviewStage.explanation }
-        return "\(reviewStage.explanation)\nResolution counts are unavailable for deleted discussions, unknown statuses, or threads closed for other reasons."
+        guard reviewStage == .commented else { return explanation }
+        return "\(explanation)\nResolution counts are unavailable for deleted discussions, unknown statuses, or threads closed for other reasons."
     }
 
     public static func newestFirst(_ lhs: Self, _ rhs: Self) -> Bool {
@@ -170,6 +187,7 @@ public struct ReviewSnapshot: Equatable, Sendable {
 
 public protocol ReviewLoading: Sendable {
     func load(configuration: ReviewConfiguration) async throws -> ReviewSnapshot
+    func invalidateIdentityCache() async
 }
 
 struct APIList<Item: Decodable & Sendable>: Decodable, Sendable {
@@ -188,6 +206,29 @@ struct APIConnection: Decodable, Sendable {
 struct APIConnectionIdentity: Decodable, Sendable {
     let id: UUID
     let isActive: Bool?
+}
+
+struct APIFollowedIdentity: Decodable, Sendable {
+    let id: UUID
+    let isContainer: Bool?
+    private let properties: Properties
+
+    func matches(email: String) -> Bool {
+        isContainer != true
+            && [properties.mail?.value, properties.account?.value].compactMap { $0 }.contains {
+                $0.caseInsensitiveCompare(email) == .orderedSame
+            }
+    }
+
+    private struct Properties: Decodable, Sendable {
+        let mail: APIProperty<String>?
+        let account: APIProperty<String>?
+
+        private enum CodingKeys: String, CodingKey {
+            case mail = "Mail"
+            case account = "Account"
+        }
+    }
 }
 
 struct APIIdentity: Decodable, Sendable {
@@ -218,6 +259,12 @@ struct APIPullRequest: Decodable, Sendable {
     let reviewers: [APIReviewer]
     let isDraft: Bool?
 
+    func reviewID(source: ReviewSource) -> String {
+        ReviewPullRequest.identifier(
+            organization: source.organization, repositoryID: repository.id, number: pullRequestId
+        )
+    }
+
     func pendingReviewer(for reviewerID: String, includeDrafts: Bool) -> APIReviewer? {
         guard status.lowercased() == "active",
               includeDrafts || isDraft != true,
@@ -230,8 +277,8 @@ struct APIPullRequest: Decodable, Sendable {
     }
 
     func review(
-        source: ReviewSource, reviewer: APIReviewer, stage: ReviewStage,
-        commentResolution: ReviewCommentResolution? = nil
+        source: ReviewSource, reviewer: APIReviewer?, stage: ReviewStage,
+        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false
     ) throws -> ReviewPullRequest {
         let url = try AzureDevOpsURL.make(
             organization: source.organization,
@@ -242,8 +289,8 @@ struct APIPullRequest: Decodable, Sendable {
             organization: source.organization, project: repository.project.name,
             repository: repository.name, repositoryID: repository.id,
             createdAt: creationDate, url: url,
-            isRequired: reviewer.isRequired == true, isDraft: isDraft == true,
-            reviewStage: stage, commentResolution: commentResolution
+            isRequired: reviewer?.isRequired == true, isDraft: isDraft == true,
+            reviewStage: stage, commentResolution: commentResolution, isFollowedOnly: isFollowedOnly
         )
     }
 }
