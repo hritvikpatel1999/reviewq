@@ -44,9 +44,11 @@ final class ReviewHistoryTests: XCTestCase {
     func testNewFeedbackIsDetectedOnTheNextRefresh() async throws {
         let transport = StubTransport([
             connectionResponse(), pullRequestsResponse([pullRequestJSON()]),
-            connectionResponse(), pullRequestsResponse([pullRequestJSON()])
+            pullRequestsResponse([pullRequestJSON()])
         ])
-        let loader = AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
+        let loader = AzureDevOpsReviewLoader(
+            authorization: StubAuthorization(header: "Bearer synthetic-cache-fixture"), transport: transport
+        )
         let first = try await loader.load(configuration: configuration())
         XCTAssertEqual(first.pullRequests.first?.reviewStage, .firstReview)
         await transport.setHistory(reviewThreadsResponse([reviewCommentThreadJSON()]), for: 1)

@@ -138,6 +138,8 @@ actor AzureDevOpsCredentials: AuthorizationProviding {
 
     private func authorizationValue(for configuration: ReviewConfiguration) async throws -> String {
         if configuration.authentication == .personalAccessToken {
+            cachedToken = nil
+            cachedTenant = ""
             guard let saved = try keychain.load() else { throw ReviewQError.missingPAT }
             let token = try KeychainPATStore.validate(saved)
             return "Basic " + Data(":\(token)".utf8).base64EncodedString()

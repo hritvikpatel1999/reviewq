@@ -35,9 +35,11 @@ struct SettingsView: View {
                     }
                     sources
                     authentication
+                    FollowedPeopleSettings(isEnabled: $draft.followPeople, emails: $draft.followedAuthorEmails)
                     additionalInstructions
                     preferences
                     startup
+                    identityCache
                     if let error = store.errorMessage {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.red)
@@ -69,7 +71,7 @@ struct SettingsView: View {
                 Button("Save and Refresh", action: save)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(promptValidationError != nil)
+                    .disabled(promptValidationError != nil || followedPeopleValidationError != nil)
             }
             .padding(16)
         }
@@ -171,7 +173,7 @@ struct SettingsView: View {
                 }
                 Toggle("Show pending count in the menu bar", isOn: $draft.showCount)
                 Toggle("Include draft pull requests", isOn: $draft.includeDrafts)
-                Text("Only active, directly assigned PRs with no vote from you are shown.")
+                Text("Repository sections show active, directly assigned PRs with no vote from you. Following people adds a separate section.")
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Text("Command-Option-Q opens or closes the review queue from any app.")
@@ -188,6 +190,15 @@ struct SettingsView: View {
     private var promptValidationError: String? {
         do {
             try draft.validatedReviewPrompts()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private var followedPeopleValidationError: String? {
+        do {
+            _ = try draft.validatedFollowedAuthors()
             return nil
         } catch {
             return error.localizedDescription
@@ -234,6 +245,21 @@ struct SettingsView: View {
         } label: { Label("Startup", systemImage: "power") }
     }
 
+    private var identityCache: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Your user ID and resolved followed authors are cached locally for 7 days, including across app restarts. No-match results expire after 15 minutes.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("PRs, votes, and comment states are still checked on every refresh. Ordinary refreshes reuse valid identities.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Refresh identities") { Task { await store.refreshIdentities() } }
+                    .disabled(store.isRefreshing || !store.configuration.hasSources)
+                    .help("Clear cached identities, renew authentication, and refresh using your saved settings.")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: { Label("Identity cache", systemImage: "person.crop.circle.badge.clock") }
+    }
+
     private func save() {
         do {
             try store.save(draft, newPAT: token)
@@ -244,6 +270,45 @@ struct SettingsView: View {
             formError = error.localizedDescription
             didSave = false
         }
+    }
+}
+
+struct FollowedPeopleSettings: View {
+    @Binding var isEnabled: Bool
+    @Binding var emails: String
+
+    private var validationError: String? {
+        guard isEnabled else { return nil }
+        do {
+            _ = try ReviewConfiguration.parseFollowedAuthorEmails(emails)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Follow PR authors", isOn: $isEnabled)
+                    .accessibilityIdentifier("follow-people-toggle")
+                TextField("alex@example.com;sam@example.com", text: $emails)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(!isEnabled)
+                    .accessibilityLabel("Followed author emails, separated by semicolons without spaces")
+                    .accessibilityIdentifier("followed-author-emails")
+                Text("Enter email addresses separated by semicolons, with no spaces.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Off by default. When enabled, People you follow appears below your repositories with other active PRs by these authors across accessible projects in your configured organizations.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Adds requests only while enabled. PATs also need Identity (Read) and Project and Team (Read). Emails stay in local preferences and are sent only to Azure DevOps to find the authors.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let validationError {
+                    Text(validationError).font(.caption).foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: { Label("People you follow", systemImage: "person.2") }
     }
 }
 

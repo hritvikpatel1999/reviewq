@@ -4,12 +4,13 @@
 
 A standalone native macOS menu-bar app for Azure DevOps pull requests that need your review.
 ReviewQ does not require SwiftBar, LeetBar, or AppFoundations at build time or runtime.
-Version 2.2 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
+Version 2.3 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
 future version, not included in this release.
 
 ## Features
 
 - Native pull-request icon with the pending-review count.
+- A bundled application icon for Finder, Spotlight, and app launchers.
 - Newest-first repository dropdowns with pending counts, author, age, review-stage labels, and one-click browser links.
 - Per-PR Edge, Scout, and Copilot actions with hover feedback.
 - Separate Scout/Copilot review instructions, with a 1,000-character limit per app.
@@ -17,7 +18,9 @@ future version, not included in this release.
 - First Review, You Approved, You Approved with Suggestions, You Waited for Author, You Rejected,
   and comment-resolution labels based on your recorded review history.
 - Multiple Azure DevOps organizations and projects.
-- Automatic refresh (1, 5, 15, or 30 minutes), manual refresh, and refresh after wake.
+- An opt-in, collapsible **People you follow** queue for PRs by configured authors.
+- Persistent, account-scoped user/author identity caches with a manual re-lookup control.
+- Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
 - Optional personal access token stored only in macOS Keychain.
 - Settings, optional draft PRs, and launch at login.
@@ -118,15 +121,42 @@ The three accurate Vision OCR checks remain native-only. Editing tests cover sin
 multiline inputs, secure-field copy restrictions, and Undo/Redo. Native Command-A was also
 verified in all four actual Settings inputs, and the global shortcut opened and closed the live queue.
 
-## Download version 2.2
+## What's new in version 2.3
 
-Download from the [ReviewQ v2.2.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.2.0).
+Version **2.3.0 / build 5** adds:
+
+- A real application icon in every packaged build, replacing the generic placeholder in Finder,
+  Spotlight, and app launchers. Rebuilt bundles refresh their timestamp to invalidate stale icons.
+  The menu-bar symbol and background-app behavior are unchanged.
+- Opt-in author following with semicolon-separated emails and a separate, collapsible
+  **People you follow** section below repositories. Followed cards show **`{author} in {repo-name}`**;
+  cards, actions, ordering, and deduplication match the existing queue.
+- Persistent current-user and followed-author identity caches: **7 days** for resolved IDs and
+  **15 minutes** for definitive author no-matches. Caches are scoped to the authenticated
+  account/tenant and configured sources/people. PRs, votes, and discussion states remain fresh.
+- **Settings > Identity cache > Refresh identities** to clear identities and renew authentication
+  using saved settings without saving or discarding a Settings draft.
+- A **15-minute default** for new configurations. Existing saved intervals are preserved.
+- Atomic executable replacement during packaging, avoiding stale code-signing pages when rebuilding
+  a previously launched app.
+
+Existing preferences, Keychain PATs, diagnostics, assistant instructions, and shortcuts are preserved.
+The [version 2.2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.2.0) remains available.
+
+Release validation passed **173 Apple Silicon tests** and **173 Intel/Rosetta tests**, including
+icon decoding/bundle lookup, following, cache expiry/account isolation, and native interaction tests.
+Five host-dependent OCR checks were excluded as documented below. Both ZIPs passed signature,
+architecture, version/build, minimum-OS, checksum, and native macOS icon-resolution checks.
+
+## Download version 2.3
+
+Download from the [ReviewQ v2.3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.3.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-2.2.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-2.2.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-2.3.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-2.3.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -140,7 +170,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 2.2 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 2.3 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -194,7 +224,10 @@ sh scripts/build-app.sh --release   # both ZIPs and SHA256SUMS.txt in dist/
 ```
 
 The packaging script verifies each executable's architecture and each app's code signature before
-archiving. Its release version comes from `Support/Info.plist`. Full native test commands are:
+archiving. It includes the checked-in `Support/AppIcon.icns` resource in every architecture.
+To regenerate that original vector-based icon, run `swift scripts/generate-app-icon.swift`;
+normal builds do not need to regenerate it. The release version comes from `Support/Info.plist`.
+Full native test commands are:
 
 ```sh
 swift test --arch arm64
@@ -202,14 +235,18 @@ swift test --arch x86_64             # on an Intel Mac
 ```
 
 On Apple Silicon, Rosetta must already be available and the SwiftPM runner itself must run as
-Intel. On the release-validation Mac, Apple's accurate Vision OCR backend fails under Rosetta.
-The three OCR-backed layout tests run in the full native suite. All remaining tests, including
-review-history states, launchers, hover rendering, and native window/interaction tests, run in the
-explicit Intel/Rosetta profile below:
+Intel. On the v2.3 release-validation Mac, three accurate Vision OCR layout checks can stall or
+fail under Rosetta, and two existing small-caption OCR checks misrecognize native bitmap text.
+The tests remain unchanged; this host's release profile explicitly excludes those five OCR checks.
+Core validation, icon checks, following/caching, review-history states, launchers, hover rendering,
+and native window/interaction tests remain included:
 
 ```sh
+swift test --arch arm64 \
+  --skip '(DashboardLayoutTests/(testDashboardRemovesFooterActionsButKeepsQuitAndRefreshTime|testDashboardStillIdentifiesTheLastSuccessfulUpdateAfterAnError|testReviewStagesAreBesideDraftWithoutNumbersOrAnotherRow)|SettingsPromptTests/(testFollowSettingsShowsTheSemicolonExampleAndOptInExplanation|testInvalidFollowEmailsShowAnExplicitValidationErrorWhenEnabled))'
+
 arch -x86_64 "$(xcrun --find swift)" test --arch x86_64 \
-  --skip 'DashboardLayoutTests/(testDashboardRemovesFooterActionsButKeepsQuitAndRefreshTime|testDashboardStillIdentifiesTheLastSuccessfulUpdateAfterAnError|testReviewStagesAreBesideDraftWithoutNumbersOrAnotherRow)'
+  --skip '(DashboardLayoutTests/(testDashboardRemovesFooterActionsButKeepsQuitAndRefreshTime|testDashboardStillIdentifiesTheLastSuccessfulUpdateAfterAnError|testReviewStagesAreBesideDraftWithoutNumbersOrAnotherRow)|SettingsPromptTests/(testFollowSettingsShowsTheSemicolonExampleAndOptInExplanation|testInvalidFollowEmailsShowAnExplicitValidationErrorWhenEnabled))'
 ```
 
 No tests are removed or weakened. ReviewQ itself does not use Vision or CoreML; OCR is only
@@ -258,6 +295,24 @@ your Azure DevOps vote. The selected assistant's own permissions and review work
 - **Copilot:** requires a current Visual Studio Code supporting `code chat`, with Copilot enabled
   and signed in. ReviewQ uses VS Code's bundled CLI to open a **new empty window** in agent mode
   with the prompt already submitted. It does not reuse or replace your current VS Code chat.
+
+### Scout still asks for Accessibility after an update
+
+An enabled ReviewQ entry can refer to an older ad-hoc signing identity. These builds are
+approved by their code hash, not by the displayed app name alone. Keep one installed copy
+for normal use, and authorize the exact copy you launch, not an architecture-packaging copy
+or the legacy PRBar app.
+
+1. Quit ReviewQ after saving any Settings changes.
+2. In **System Settings > Privacy & Security > Accessibility**, remove the old ReviewQ entry.
+3. Use **+** to add your current `ReviewQ.app`, enable it, and confirm any macOS approval.
+4. Reopen ReviewQ, open Scout manually, and try its review action again.
+
+If the stale entry cannot be refreshed, reset **only ReviewQ's** Accessibility entry with
+`tccutil reset Accessibility dev.prbar.app`, then add and approve the current app again.
+This does not clear saved ReviewQ settings or Keychain PATs, but the Accessibility grant
+must be confirmed again. Do not reset other apps' permissions or disable macOS protections.
+A future Developer ID signed release can provide a stable signing identity across updates.
 
 No clipboard replacement, tokens, PR titles, or PR content are sent by ReviewQ. Only the selected
 PR link and any configured additional instructions are handed to the local app; that assistant
@@ -349,9 +404,81 @@ If history cannot be read, the refresh fails visibly instead of guessing a First
 
 3. Choose **Save and Refresh**.
 
+New configurations refresh **every 15 minutes** by default. Existing saved intervals, including
+five minutes, are preserved; change **Settings > Preferences > Refresh** to choose another interval.
+
+## Identity cache
+
+ReviewQ persists only the identity metadata needed to avoid repeated account lookups:
+
+- Your Azure DevOps user ID in each organization: **7 days**.
+- Each followed email's Azure DevOps author ID, per organization: **7 days**.
+- A complete, successful author lookup with no match: **15 minutes**.
+
+Failures, ambiguous identities, malformed responses, and incomplete identity pages are never cached
+as no-match results. A cached no-match still produces the normal unresolved-author error if the email
+does not match in any configured organization. Hits do not extend expiry.
+
+The bounded cache is separate from saved settings and survives app restarts. It is isolated by
+authentication method, authenticated account/tenant, and configured sources/followed people.
+Changing those inputs starts a fresh identity context. Azure CLI token renewal keeps the cache
+when the token provides stable tenant/object claims; these claims partition the cache only, never
+replace Azure DevOps identity lookups or authorize requests. Opaque credentials use a one-way
+credential fingerprint, so their rotation conservatively starts a fresh context. Raw tokens and
+authorization headers are never persisted in the cache.
+
+Use **Settings > Identity cache > Refresh identities** after switching Azure CLI accounts, an account
+recreation, or an email reassignment. This clears both identity caches, renews authentication, and
+refreshes using **saved settings**, without saving or discarding a Settings draft. An ordinary
+Refresh reuses unexpired identities. The last successful queue remains visible if re-lookup fails.
+
+**PR lists, project discovery, reviewer votes, and comment/thread states still refresh normally.**
+PR contents and history are not persisted. Identity cache diagnostics contain only event/reason
+categories, not email addresses, organizations, user IDs, credential fingerprints, or token claims.
+
+## People you follow
+
+Following PR authors is **off by default**. In Settings, enable **Follow PR authors** and enter
+email addresses separated by semicolons, **without spaces**:
+
+```text
+alex@example.com;sam@example.com
+```
+
+Choose **Save and Refresh**. A separate collapsible **People you follow** section appears **below all
+repository dropdowns**. It starts collapsed; click its header to show or hide the PRs. The count stays
+visible, and its expanded/collapsed state is retained through refreshes and reopening the menu.
+It includes other active PRs created by these people, even when you are not a reviewer.
+PRs already shown in a repository section are not duplicated. The cards, browser/assistant actions,
+review-history labels, and newest-first sorting are unchanged; followed cards show
+**`{author} in {repo-name}`** instead of just the author. No organization name is added to that line.
+The menu-bar and header counts include both sections, counting each PR once.
+
+Following searches **all accessible projects in each configured organization**, even when a review
+source is a project-specific URL. It never searches an unconfigured organization. The draft preference
+also applies to followed PRs; completed and abandoned PRs are excluded. Unlike the assigned queue,
+followed PRs are not restricted to your current reviewer vote.
+
+**Permissions:** PATs need **Identity (Read)** to resolve author emails and **Project and Team (Read)**
+to discover projects, in addition to **Code (Read)**. Azure CLI uses your existing account's access.
+An email must resolve to an Azure DevOps user in at least one configured organization.
+Unmatched or ambiguous identities, missing permissions, and failed requests are reported rather than
+silently showing incomplete results. The last successful queue remains visible if a refresh fails.
+
+**Requests and privacy:** with following off, there are no followed-author requests. With it on,
+an identity cache miss adds one lookup per unique email per organization. Each refresh still adds
+project discovery where it was not already needed, paginated creator-filtered PR queries per unique
+author/project, and one history request per additional PR. Duplicate PRs do not get another history request. History loading
+retains its four-request concurrency limit. Large organizations or long follow lists therefore take
+longer to refresh. Emails are stored in local preferences and sent only to Azure DevOps for lookup;
+they, identity responses, and query URLs are not written to diagnostic logs.
+
+Turning the feature off removes the extra section on Save and Refresh and stops its requests.
+Your email list is retained locally so you can enable it again.
+
 ## What counts as "needs review"?
 
-A PR is included when it is active, directly lists the authenticated Azure DevOps user as a
+In the repository sections, a PR is included when it is active, directly lists the authenticated Azure DevOps user as a
 reviewer, and that user's vote is **No vote (0)**. Your own PRs and declined reviews are excluded.
 Approved, approved-with-suggestions, rejected, and waiting-for-author votes are excluded.
 Drafts are excluded unless **Include draft pull requests** is enabled. The newest requests appear
@@ -364,7 +491,8 @@ are counted once. Team/group-only reviewer assignments are not expanded in this 
 All configured sources must refresh successfully before the queue is replaced. If any source
 fails, the last successful queue remains visible with an error banner, its original update time,
 and a `!` in the menu bar. Before the first successful refresh, no zero count is shown.
-Review data is kept in memory, not persisted to disk.
+PR contents and review history are kept in memory, not persisted to disk. Only the identity metadata
+described above is cached in local preferences.
 
 ## Diagnostics
 

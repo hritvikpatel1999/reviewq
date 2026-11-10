@@ -15,6 +15,45 @@ final class DiagnosticsTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
+    func testIdentityCacheEventsAndCorruptionNeverLogPrivateKeysOrPayloads() throws {
+        let name = "ReviewQ-identity-diagnostics-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(Data("PRIVATE_CACHE_PAYLOAD".utf8), forKey: IdentityCache.settingsKey)
+        let logger = DiagnosticLogger(directory: directory, verboseEnabled: true)
+        let cache = IdentityCache(defaults: defaults, diagnostics: logger)
+        let settings = configuration("https://dev.azure.com/private-cache-org/Project")
+        let scope = try IdentityCache.scope(
+            configuration: settings, header: "Bearer PRIVATE_CACHE_CREDENTIAL",
+            sources: settings.validatedSources(), followedEmails: []
+        )
+        let context = try cache.begin(scope: scope)
+        let user = try XCTUnwrap(UUID(uuidString: reviewerID))
+        XCTAssertNil(try cache.currentUser(organization: "private-cache-org", context: context))
+        try cache.storeCurrentUser(user, organization: "private-cache-org", context: context)
+        _ = try cache.currentUser(organization: "private-cache-org", context: context)
+        try cache.storeFollowedAuthor(
+            nil, organization: "private-cache-org", email: "private-cache@example.com", context: context
+        )
+        _ = try cache.followedAuthor(
+            organization: "private-cache-org", email: "private-cache@example.com", context: context
+        )
+        cache.clear()
+        logger.flush()
+        XCTAssertTrue(try records().contains { $0.event == .identityCacheInvalidated && $0.reason == .decoding })
+        let events = try records("verbose.log").map(\.event)
+        XCTAssertTrue(events.contains(.identityCacheHit))
+        XCTAssertTrue(events.contains(.identityCacheMiss))
+        XCTAssertTrue(events.contains(.identityCacheCleared))
+        let text = try logText()
+        for sentinel in [
+            "PRIVATE_CACHE_PAYLOAD", "PRIVATE_CACHE_CREDENTIAL", "private-cache-org",
+            "private-cache@example.com", reviewerID, scope
+        ] {
+            XCTAssertFalse(text.contains(sentinel))
+        }
+    }
+
     func testDefaultCollectionIsProblemsAndStartupOnly() throws {
         let logger = DiagnosticLogger(directory: directory)
         logger.start()
@@ -245,6 +284,34 @@ final class DiagnosticsTests: XCTestCase {
         for value in [sentinel, "private-content-sentinel", reviewerID, authorID, "dev.azure.com", "Fixture author"] {
             XCTAssertFalse(text.contains(value))
         }
+    }
+
+    @MainActor
+    func testFollowedIdentityRequestsNeverLogEmailQueriesOrIdentityResponses() async throws {
+        let email = "private-follow-sentinel@example.com"
+        let logger = DiagnosticLogger(directory: directory, verboseEnabled: true)
+        let transport = StubTransport([
+            connectionResponse(), pullRequestsResponse([]),
+            identitiesResponse([followedIdentityJSON(email: email)]), projectsResponse(["Project"]),
+            pullRequestsResponse([pullRequestJSON(hasReviewer: false)])
+        ])
+        var settings = configuration()
+        settings.followPeople = true
+        settings.followedAuthorEmails = email
+        let result = try await AzureDevOpsReviewLoader(
+            authorization: StubAuthorization(), transport: transport, diagnostics: logger
+        ).load(configuration: settings)
+        XCTAssertEqual(result.pullRequests.count, 1)
+        logger.flush()
+        XCTAssertTrue(try records("verbose.log").contains { $0.operation == .followedIdentity })
+        let text = try logText()
+        for value in [email, "filterValue", "vssps.dev.azure.com", authorID, "Fixture author"] {
+            XCTAssertFalse(text.contains(value), value)
+        }
+        logger.logFailure(.refreshFailed, error: ReviewQError.unresolvedFollowedAuthors([email]))
+        logger.flush()
+        XCTAssertFalse(try logText().contains(email))
+        XCTAssertEqual(try records().last?.reason, .invalidConfiguration)
     }
 
     @MainActor

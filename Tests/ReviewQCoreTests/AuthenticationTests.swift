@@ -95,6 +95,23 @@ final class AuthenticationTests: XCTestCase {
         }
     }
 
+    func testSwitchingBackFromPATRechecksTheAzureCLIAccount() async throws {
+        let runner = StubCommandRunner(Data("""
+        {"accessToken":"synthetic-token","expires_on":9999999999}
+        """.utf8))
+        let provider = AzureDevOpsCredentials(
+            keychain: StubPATStore(), runner: runner, executable: URL(fileURLWithPath: "/synthetic/az")
+        )
+        var settings = configuration()
+        _ = try await provider.authorization(for: settings)
+        settings.authentication = .personalAccessToken
+        _ = try await provider.authorization(for: settings)
+        settings.authentication = .azureCLI
+        _ = try await provider.authorization(for: settings)
+        let calls = await runner.calls
+        XCTAssertEqual(calls.count, 2)
+    }
+
     func testCommandRunnerCapturesOutputAndReportsFailure() async throws {
         let runner = AzureCLICommandRunner()
         let output = try await runner.run(

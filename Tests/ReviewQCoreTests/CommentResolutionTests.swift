@@ -103,10 +103,12 @@ final class CommentResolutionTests: XCTestCase {
     func testCountersUpdateDuringTheExistingRefreshWithoutChangingPRIdentity() async throws {
         let transport = StubTransport(
             [connectionResponse(), pullRequestsResponse([pullRequestJSON()]),
-             connectionResponse(), pullRequestsResponse([pullRequestJSON()])],
+             pullRequestsResponse([pullRequestJSON()])],
             histories: [1: reviewThreadsResponse([reviewCommentThreadJSON(statusJSON: "\"active\"")])]
         )
-        let loader = AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
+        let loader = AzureDevOpsReviewLoader(
+            authorization: StubAuthorization(header: "Bearer synthetic-cache-fixture"), transport: transport
+        )
         let firstResult = try await loader.load(configuration: configuration())
         let first = try XCTUnwrap(firstResult.pullRequests.first)
         await transport.setHistory(
@@ -118,7 +120,7 @@ final class CommentResolutionTests: XCTestCase {
         XCTAssertEqual(first.reviewStageLabel, "You commented [0 resolved, 1 open]")
         XCTAssertEqual(next.reviewStageLabel, "Your comments are resolved")
         let requests = await transport.requests
-        XCTAssertEqual(requests.count, 6)
+        XCTAssertEqual(requests.count, 5)
     }
 
     func testAllThreeStatesUseExactlyTheExistingHTTPRequestsAndQueryParameters() async throws {

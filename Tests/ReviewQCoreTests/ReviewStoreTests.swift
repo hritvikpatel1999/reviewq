@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class ReviewStoreTests: XCTestCase {
+    func testRefreshingIdentitiesInvalidatesTheLoaderWithoutSavingSettingsOrDiscardingTheSnapshot() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let snapshot = ReviewSnapshot(pullRequests: [], updatedAt: Date(timeIntervalSince1970: 1))
+        let loader = StubReviewLoader([.success(snapshot), .failure(.http(403, "example/Project"))])
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: loader)
+        var saved = configuration()
+        saved.refreshInterval = .fiveMinutes
+        try store.save(saved)
+        let encoded = defaults.data(forKey: ReviewStore.settingsKey)
+        await store.refresh()
+        await store.refreshIdentities()
+        let invalidations = await loader.identityInvalidations
+        let calls = await loader.calls
+        XCTAssertEqual(invalidations, 1)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(store.snapshot, snapshot)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertEqual(store.configuration, saved)
+        XCTAssertEqual(defaults.data(forKey: ReviewStore.settingsKey), encoded)
+    }
+
     private func preferences() throws -> (UserDefaults, String) {
         let name = "ReviewQ-tests-\(UUID().uuidString)"
         return (try XCTUnwrap(UserDefaults(suiteName: name)), name)
@@ -59,6 +81,8 @@ final class ReviewStoreTests: XCTestCase {
         settings.showCount = false
         settings.scoutAdditionalInstructions = "Use Scout's review skill.\nCheck correctness."
         settings.copilotAdditionalInstructions = "Use Copilot's review skill.\nCheck regressions."
+        settings.followPeople = true
+        settings.followedAuthorEmails = "alex@example.com;sam@example.com"
         let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]))
         try store.save(settings, newPAT: "synthetic-token")
         let data = try XCTUnwrap(defaults.data(forKey: ReviewStore.settingsKey))
@@ -104,6 +128,33 @@ final class ReviewStoreTests: XCTestCase {
         XCTAssertEqual(store.errorMessage, ReviewQError.reviewPromptTooLong.localizedDescription)
         XCTAssertEqual(store.menuBarTitle, " !")
         XCTAssertEqual(store.configuration.copilotAdditionalInstructions, settings.copilotAdditionalInstructions)
+    }
+
+    func testInvalidFollowSettingsCannotReplacePreferencesSnapshotOrPAT() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let keychain = StubPATStore(onSave: { _ in
+            XCTFail("Invalid followed emails must be rejected before the saved PAT can be changed.")
+        })
+        let snapshot = ReviewSnapshot(pullRequests: [])
+        let store = ReviewStore(defaults: defaults, keychain: keychain, loader: StubReviewLoader([.success(snapshot)]))
+        var original = configuration()
+        original.authentication = .personalAccessToken
+        try store.save(original)
+        await store.refresh()
+        let saved = try XCTUnwrap(defaults.data(forKey: ReviewStore.settingsKey))
+        var invalid = original
+        invalid.followPeople = true
+        invalid.followedAuthorEmails = "alex@example.com; sam@example.com"
+        XCTAssertThrowsError(try store.save(invalid, newPAT: "replacement-token"))
+        XCTAssertEqual(store.configuration, original)
+        XCTAssertEqual(defaults.data(forKey: ReviewStore.settingsKey), saved)
+        XCTAssertEqual(store.snapshot, snapshot)
+        invalid.sourceURLs = ""
+        defaults.set(try JSONEncoder().encode(invalid), forKey: ReviewStore.settingsKey)
+        let restored = ReviewStore(defaults: defaults, keychain: keychain, loader: StubReviewLoader([]))
+        XCTAssertEqual(restored.errorMessage, ReviewQError.invalidFollowedAuthorEmails.localizedDescription)
+        XCTAssertEqual(restored.configuration.followedAuthorEmails, invalid.followedAuthorEmails)
     }
 
     func testInvalidSettingsCannotReplaceSavedConfiguration() throws {

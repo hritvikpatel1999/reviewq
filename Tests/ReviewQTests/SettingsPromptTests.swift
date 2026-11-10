@@ -31,6 +31,60 @@ final class SettingsPromptTests: XCTestCase {
         }
     }
 
+    func testFollowSettingsShowsTheSemicolonExampleAndOptInExplanation() async throws {
+        let lines = try recognize(await captureFollowSettings(enabled: false, emails: ""))
+        let text = lines.map(\.text).joined(separator: "\n")
+        XCTAssertTrue(text.contains("People you follow"), text)
+        XCTAssertTrue(text.contains("alex@example.com") && text.contains("sam@example.com"), text)
+        XCTAssertTrue(text.contains("Off by default"), text)
+        XCTAssertTrue(text.contains("semicolons"), text)
+        XCTAssertTrue(text.contains("no spaces"), text)
+        XCTAssertFalse(text.contains("Enter at least one email"), text)
+    }
+
+    func testInvalidFollowEmailsShowAnExplicitValidationErrorWhenEnabled() async throws {
+        let lines = try recognize(await captureFollowSettings(
+            enabled: true, emails: "alex@example.com; sam@example.com"
+        ))
+        XCTAssertTrue(lines.map(\.text).joined(separator: " ").contains("Enter at least one email"), "\(lines)")
+    }
+
+    private func captureFollowSettings(enabled: Bool, emails: String) async throws -> CGImage {
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView:
+            FollowedPeopleSettings(isEnabled: .constant(enabled), emails: .constant(emails))
+                .frame(width: 560, height: 340)
+                .environment(\.colorScheme, .light)
+                .environment(\.locale, Locale(identifier: "en_US"))
+                .background(Color.white)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 340),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        await Task.yield()
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(200))
+        host.displayIfNeeded()
+        let field = try XCTUnwrap(textFields(in: host).first { $0.placeholderString != nil })
+        XCTAssertEqual(field.placeholderString, "alex@example.com;sam@example.com")
+        XCTAssertEqual(field.isEnabled, enabled)
+        XCTAssertEqual(field.stringValue, emails)
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        return try XCTUnwrap(bitmap.cgImage)
+    }
+
+    private func textFields(in view: NSView) -> [NSTextField] {
+        if let field = view as? NSTextField { return [field] }
+        return view.subviews.flatMap { textFields(in: $0) }
+    }
+
     private func render(_ view: some View) throws -> CGImage {
         _ = NSApplication.shared
         let renderer = ImageRenderer(

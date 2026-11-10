@@ -6,9 +6,14 @@ struct DashboardView: View {
     @ObservedObject var store: ReviewStore
     @ObservedObject var app: AppDelegate
     @State private var expandedRepositoryIDs: Set<String> = []
+    @State private var isFollowedPeopleExpanded = false
 
     private var groups: [RepositoryGroup] {
         RepositoryGroup.grouping(store.snapshot?.pullRequests ?? [])
+    }
+
+    private var followedRequests: [ReviewPullRequest] {
+        (store.snapshot?.pullRequests ?? []).filter(\.isFollowedOnly).sorted(by: ReviewPullRequest.newestFirst)
     }
 
     var body: some View {
@@ -101,7 +106,7 @@ struct DashboardView: View {
                 }
             }
             .padding(24)
-        } else if groups.isEmpty {
+        } else if groups.isEmpty && !store.configuration.followPeople {
             VStack(spacing: 12) {
                 Image(systemName: store.errorMessage == nil ? "checkmark.circle" : "clock.badge.exclamationmark")
                     .font(.system(size: 42))
@@ -138,6 +143,18 @@ struct DashboardView: View {
                             isLaunchingReview: app.isLaunchingReview
                         )
                     }
+                    if store.configuration.followPeople {
+                        FollowedPeopleSection(
+                            requests: followedRequests,
+                            isExpanded: $isFollowedPeopleExpanded,
+                            open: { app.open($0.url) },
+                            openInEdge: { app.openInEdge($0.url) },
+                            review: { request, assistant in
+                                Task { await app.review(request, with: assistant) }
+                            },
+                            isLaunchingReview: app.isLaunchingReview
+                        )
+                    }
                 }
                 .padding(12)
             }
@@ -164,7 +181,7 @@ struct RepositoryGroup: Identifiable {
     let requests: [ReviewPullRequest]
 
     static func grouping(_ requests: [ReviewPullRequest]) -> [RepositoryGroup] {
-        Dictionary(grouping: requests, by: \.groupID).map { group in
+        Dictionary(grouping: requests.filter { !$0.isFollowedOnly }, by: \.groupID).map { group in
             let repository = group.value[0]
             return RepositoryGroup(
                 id: group.key, repository: repository.repository,
@@ -173,6 +190,53 @@ struct RepositoryGroup: Identifiable {
             )
         }
         .sorted { $0.id < $1.id }
+    }
+}
+
+struct FollowedPeopleSection: View {
+    let requests: [ReviewPullRequest]
+    @Binding var isExpanded: Bool
+    let open: (ReviewPullRequest) -> Void
+    let openInEdge: (ReviewPullRequest) -> Void
+    let review: (ReviewPullRequest, ReviewAssistant) -> Void
+    let isLaunchingReview: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 6) {
+                if requests.isEmpty {
+                    Text("No other active PRs from people you follow.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(requests) { request in
+                        PullRequestRow(
+                            request: request, open: { open(request) },
+                            openInEdge: { openInEdge(request) },
+                            review: { review(request, $0) }, isLaunchingReview: isLaunchingReview
+                        )
+                    }
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 10) {
+                Label("People you follow", systemImage: "person.2")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                Text("\(requests.count)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.tint)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .accessibilityLabel("\(requests.count) followed pull requests")
+            }
+        }
+        .disclosureGroupStyle(ReviewDisclosureStyle(
+            accessibilityHint: "Show or hide pull requests from people you follow"
+        ))
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("followed-people-section")
     }
 }
 
@@ -215,14 +279,16 @@ struct RepositoryDropdown: View {
                     .accessibilityLabel("\(group.requests.count) pending pull requests")
             }
         }
-        .disclosureGroupStyle(RepositoryDisclosureStyle())
+        .disclosureGroupStyle(ReviewDisclosureStyle(accessibilityHint: "Show or hide this repository's pull requests"))
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityIdentifier("repository-dropdown-\(group.id)")
     }
 }
 
-private struct RepositoryDisclosureStyle: DisclosureGroupStyle {
+private struct ReviewDisclosureStyle: DisclosureGroupStyle {
+    let accessibilityHint: String
+
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -241,7 +307,7 @@ private struct RepositoryDisclosureStyle: DisclosureGroupStyle {
             }
             .buttonStyle(.plain)
             .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Show or hide this repository's pull requests")
+            .accessibilityHint(accessibilityHint)
             if configuration.isExpanded { configuration.content }
         }
     }
@@ -279,7 +345,7 @@ struct PullRequestRow: View {
                     Text(request.title).font(.system(size: 13, weight: .medium)).lineLimit(2)
                         .multilineTextAlignment(.leading)
                     HStack {
-                        Text(request.author).lineLimit(1)
+                        Text(request.authorLabel).lineLimit(1).help(request.authorLabel)
                         Spacer()
                         Text(request.createdAt, style: .relative)
                     }
@@ -290,7 +356,7 @@ struct PullRequestRow: View {
                 .contentShape(RoundedRectangle(cornerRadius: 9))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Pull request: \(request.title), by \(request.author), \(request.reviewStageLabel)")
+            .accessibilityLabel("Pull request: \(request.title), by \(request.authorLabel), \(request.reviewStageLabel)")
             .help("Open pull request in your browser")
 
             HStack(spacing: 6) {

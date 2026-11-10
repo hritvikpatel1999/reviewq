@@ -27,9 +27,11 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
     public var sourceURLs = ""
     public var authentication = AuthenticationMethod.azureCLI
     public var tenantID = ""
-    public var refreshInterval = RefreshInterval.fiveMinutes
+    public var refreshInterval = RefreshInterval.fifteenMinutes
     public var includeDrafts = false
     public var showCount = true
+    public var followPeople = false
+    public var followedAuthorEmails = ""
     public var scoutAdditionalInstructions = ""
     public var copilotAdditionalInstructions = ""
 
@@ -37,6 +39,7 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sourceURLs, authentication, tenantID, refreshInterval, includeDrafts, showCount
+        case followPeople, followedAuthorEmails
         case scoutAdditionalInstructions, copilotAdditionalInstructions
     }
 
@@ -48,6 +51,10 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
         refreshInterval = try container.decode(RefreshInterval.self, forKey: .refreshInterval)
         includeDrafts = try container.decode(Bool.self, forKey: .includeDrafts)
         showCount = try container.decode(Bool.self, forKey: .showCount)
+        followPeople = container.contains(.followPeople)
+            ? try container.decode(Bool.self, forKey: .followPeople) : false
+        followedAuthorEmails = container.contains(.followedAuthorEmails)
+            ? try container.decode(String.self, forKey: .followedAuthorEmails) : ""
         scoutAdditionalInstructions = container.contains(.scoutAdditionalInstructions)
             ? try container.decode(String.self, forKey: .scoutAdditionalInstructions) : ""
         copilotAdditionalInstructions = container.contains(.copilotAdditionalInstructions)
@@ -66,12 +73,39 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
         try Self.validateAdditionalInstructions(copilotAdditionalInstructions)
     }
 
+    public func validatedFollowedAuthors() throws -> [String] {
+        guard followPeople else { return [] }
+        return try Self.parseFollowedAuthorEmails(followedAuthorEmails)
+    }
+
+    public static func parseFollowedAuthorEmails(_ text: String) throws -> [String] {
+        let entries = text.components(separatedBy: ";")
+        var emails: [String] = []
+        var seen: Set<String> = []
+        for entry in entries {
+            let parts = entry.split(separator: "@", omittingEmptySubsequences: false)
+            guard !entry.contains(where: \.isWhitespace), entry.utf8.count <= 254, parts.count == 2,
+                  !parts[0].isEmpty, parts[0].utf8.count <= 64,
+                  !parts[0].hasPrefix("."), !parts[0].hasSuffix("."), !parts[0].contains(".."),
+                  parts[0].range(of: #"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$"#, options: .regularExpression) != nil,
+                  parts[1].range(
+                    of: #"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"#,
+                    options: .regularExpression
+                  ) != nil
+            else { throw ReviewQError.invalidFollowedAuthorEmails }
+            let email = entry.lowercased()
+            if seen.insert(email).inserted { emails.append(email) }
+        }
+        return emails
+    }
+
     public var hasSources: Bool {
         !sourceURLs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public func validatedSources() throws -> [ReviewSource] {
         try validatedReviewPrompts()
+        _ = try validatedFollowedAuthors()
         let lines = sourceURLs.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -154,11 +188,12 @@ public struct ReviewSource: Hashable, Sendable, Identifiable {
 
 enum AzureDevOpsURL {
     static func make(
-        organization: String, path: [String], query: [URLQueryItem] = []
+        organization: String, path: [String], query: [URLQueryItem] = [],
+        identityService: Bool = false
     ) throws -> URL {
         var components = URLComponents()
         components.scheme = "https"
-        components.host = "dev.azure.com"
+        components.host = identityService ? "vssps.dev.azure.com" : "dev.azure.com"
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/%?#")
         let encoded = try ([organization] + path).map { segment in
@@ -168,7 +203,10 @@ enum AzureDevOpsURL {
             return value
         }
         components.percentEncodedPath = "/" + encoded.joined(separator: "/")
-        if !query.isEmpty { components.queryItems = query }
+        if !query.isEmpty {
+            components.queryItems = query
+            components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         guard let url = components.url else { throw ReviewQError.invalidSource(organization) }
         return url
     }
@@ -181,6 +219,8 @@ public enum ReviewQError: LocalizedError, Sendable {
     case invalidTenant
     case reviewPromptTooLong
     case invalidReviewPrompt
+    case invalidFollowedAuthorEmails
+    case unresolvedFollowedAuthors([String])
     case missingPAT
     case invalidPAT
     case keychain(Int32)
@@ -209,6 +249,11 @@ public enum ReviewQError: LocalizedError, Sendable {
             "Each app's additional review instructions must be \(ReviewConfiguration.additionalPromptCharacterLimit) characters or fewer."
         case .invalidReviewPrompt:
             "Additional review instructions support text and line breaks, not tabs or other control characters."
+        case .invalidFollowedAuthorEmails:
+            "Enter at least one email, separated by semicolons with no spaces, for example alex@example.com;sam@example.com."
+        case .unresolvedFollowedAuthors(let emails):
+            "No matching Azure DevOps user was found in your configured organizations for: \(emails.joined(separator: ";")). "
+                + "Check the email addresses and your access, or turn off People you follow."
         case .missingPAT:
             "No personal access token is saved. Add a Code (Read) PAT in Settings."
         case .invalidPAT:

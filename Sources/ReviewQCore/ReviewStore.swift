@@ -29,7 +29,9 @@ public final class ReviewStore: ObservableObject {
         self.defaults = defaults
         self.keychain = keychain
         self.diagnostics = diagnostics
-        self.loader = loader ?? AzureDevOpsReviewLoader(keychain: keychain, diagnostics: diagnostics)
+        self.loader = loader ?? AzureDevOpsReviewLoader(
+            keychain: keychain, diagnostics: diagnostics, defaults: defaults
+        )
         var loaded = ReviewConfiguration()
         var initialError: String?
         var initialReason: DiagnosticReason = .corruptSettings
@@ -37,6 +39,7 @@ public final class ReviewStore: ObservableObject {
             do {
                 loaded = try JSONDecoder().decode(ReviewConfiguration.self, from: data)
                 try loaded.validatedReviewPrompts()
+                _ = try loaded.validatedFollowedAuthors()
                 if loaded.hasSources { _ = try loaded.validatedSources() }
             } catch {
                 initialError = error is DecodingError
@@ -79,6 +82,21 @@ public final class ReviewStore: ObservableObject {
         guard !isRefreshing else { return }
         manualTask?.cancel()
         manualTask = Task { [weak self] in await self?.refresh() }
+    }
+
+    public func refreshIdentities() async {
+        cancelTasks()
+        let currentGeneration = generation
+        await loader.invalidateIdentityCache()
+        guard generation == currentGeneration else {
+            diagnostics.log(.info, .refreshCancelled, operation: .identityCache, reason: .superseded)
+            return
+        }
+        if isStarted {
+            startPolling()
+        } else {
+            await refresh()
+        }
     }
 
     public func refresh() async {

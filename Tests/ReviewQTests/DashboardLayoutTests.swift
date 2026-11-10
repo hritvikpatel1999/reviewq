@@ -45,6 +45,98 @@ final class DashboardLayoutTests: XCTestCase {
         XCTAssertFalse(ReviewPullRequest.newestFirst(tieA, tieA))
     }
 
+    func testRepositoryGroupingExcludesFollowedOnlyRequests() {
+        let assigned = fixture(number: 1)
+        let followed = fixture(number: 2, isFollowedOnly: true, repository: "Another repository")
+        let groups = RepositoryGroup.grouping([followed, assigned])
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.requests, [assigned])
+        XCTAssertTrue(RepositoryGroup.grouping([followed]).isEmpty)
+    }
+
+    func testFollowedAuthorShowsOnlyRepositoryOnTheSameLineWithoutChangingCardHeight() throws {
+        var heights: Set<Int> = []
+        for followed in [false, true] {
+            let request = fixture(draft: true, isFollowedOnly: followed)
+            let image = try render(
+                PullRequestRow(
+                    request: request, open: {}, openInEdge: {}, review: { _ in }, isLaunchingReview: false
+                ).frame(width: 392)
+            )
+            heights.insert(image.height)
+            let lines = try recognize(image, level: .fast)
+            XCTAssertTrue(lines.contains { $0.contains(request.authorLabel) }, "\(lines)")
+            XCTAssertFalse(lines.joined().contains("example"))
+            XCTAssertFalse(lines.joined().contains("Project"))
+            XCTAssertEqual(lines.joined().contains("Service"), followed)
+            XCTAssertTrue(lines.contains { $0.contains("Draft") && $0.contains("First Review") }, "\(lines)")
+        }
+        XCTAssertEqual(heights.count, 1, "The repository belongs on the existing author line, not a new row.")
+    }
+
+    func testPeopleSectionIsBelowAllRepositoryHeaders() async throws {
+        let name = "ReviewQ-followed-layout-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = try makeStore(defaults: defaults, followPeople: true, requests: [
+            fixture(number: 1, repository: "Alpha"),
+            fixture(number: 2, repository: "Beta"),
+            fixture(number: 3, isFollowedOnly: true, repository: "Gamma")
+        ])
+        await store.refresh()
+        let lines = try recognize(
+            await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
+        )
+        let peopleIndex = try XCTUnwrap(lines.firstIndex { $0.contains("People you follow") }, "\(lines)")
+        for name in ["Alpha", "Beta"] {
+            XCTAssertLessThan(try XCTUnwrap(lines.firstIndex { $0 == name }, "\(lines)"), peopleIndex)
+        }
+        XCTAssertFalse(lines.contains { $0.contains("A reviewer in Gamma") }, "People you follow starts collapsed: \(lines)")
+    }
+
+    func testFollowedOnlyQueueStartsCollapsedAndNeverShowsCaughtUp() async throws {
+        let name = "ReviewQ-followed-only-layout-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = try makeStore(defaults: defaults, followPeople: true, requests: [
+            fixture(number: 1, createdAt: 100, isFollowedOnly: true, title: "Older followed PR"),
+            fixture(number: 2, createdAt: 200, isFollowedOnly: true, title: "Newest followed PR")
+        ])
+        await store.refresh()
+        let lines = try recognize(
+            await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
+        )
+        XCTAssertTrue(lines.contains { $0.contains("People you follow") }, "\(lines)")
+        XCTAssertFalse(lines.joined().contains("caught up"))
+        XCTAssertFalse(lines.contains { $0.contains("Newest followed PR") || $0.contains("Older followed PR") }, "\(lines)")
+    }
+
+    func testEmptyPeopleSectionIsVisibleOnlyWhenOptedIn() async throws {
+        for enabled in [false, true] {
+            let name = "ReviewQ-empty-followed-layout-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+            defer { defaults.removePersistentDomain(forName: name) }
+            let store = try makeStore(defaults: defaults, followPeople: enabled)
+            await store.refresh()
+            let lines = try recognize(
+                await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
+            )
+            XCTAssertEqual(lines.joined().contains("People you follow"), enabled, "\(lines)")
+            XCTAssertFalse(lines.joined().localizedCaseInsensitiveContains("No other active PRs"), "\(lines)")
+        }
+    }
+
+    func testExpandedEmptyPeopleSectionShowsItsEmptyMessage() throws {
+        let image = try render(
+            FollowedPeopleSection(
+                requests: [], isExpanded: .constant(true), open: { _ in }, openInEdge: { _ in },
+                review: { _, _ in }, isLaunchingReview: false
+            ).frame(width: 416)
+        )
+        let lines = try recognize(image, level: .fast)
+        XCTAssertTrue(lines.joined().localizedCaseInsensitiveContains("No other active PRs"), "\(lines)")
+    }
+
     func testCommentResolutionLabelsStayBesideDraftWithoutAddingRowHeight() throws {
         let counted = fixture(
             stage: .commented, draft: true, required: true,
@@ -107,21 +199,29 @@ final class DashboardLayoutTests: XCTestCase {
     private func fixture(
         number: Int = 8675309, createdAt: TimeInterval = 1,
         stage: ReviewStage = .firstReview, draft: Bool = false, required: Bool = false,
-        commentResolution: ReviewCommentResolution? = nil
+        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false,
+        repository: String = "Service", title: String = "A compact pull request row"
     ) -> ReviewPullRequest {
         ReviewPullRequest(
-            number: number, title: "A compact pull request row", author: "A reviewer",
-            organization: "example", project: "Project", repository: "Service", repositoryID: "service-id",
+            number: number, title: title, author: "A reviewer",
+            organization: "example", project: "Project", repository: repository, repositoryID: "service-id",
             createdAt: Date(timeIntervalSince1970: createdAt),
             url: URL(string: "https://dev.azure.com/example/Project/_git/service/pullrequest/\(number)")!,
-            isRequired: required, isDraft: draft, reviewStage: stage, commentResolution: commentResolution
+            isRequired: required, isDraft: draft, reviewStage: stage, commentResolution: commentResolution,
+            isFollowedOnly: isFollowedOnly
         )
     }
 
-    private func makeStore(defaults: UserDefaults) throws -> ReviewStore {
-        let store = ReviewStore(defaults: defaults, keychain: NoPATStore(), loader: LayoutReviewLoader())
+    private func makeStore(
+        defaults: UserDefaults, followPeople: Bool = false, requests: [ReviewPullRequest] = []
+    ) throws -> ReviewStore {
+        let store = ReviewStore(
+            defaults: defaults, keychain: NoPATStore(), loader: LayoutReviewLoader(requests: requests)
+        )
         var settings = ReviewConfiguration()
         settings.sourceURLs = "https://dev.azure.com/example/Project"
+        settings.followPeople = followPeople
+        settings.followedAuthorEmails = followPeople ? "alex@example.com" : ""
         try store.save(settings)
         return store
     }
@@ -182,11 +282,18 @@ private struct NoPATStore: PATStoring {
 }
 
 private actor LayoutReviewLoader: ReviewLoading {
+    func invalidateIdentityCache() {}
+
     private var calls = 0
+    private let requests: [ReviewPullRequest]
+
+    init(requests: [ReviewPullRequest]) {
+        self.requests = requests
+    }
 
     func load(configuration: ReviewConfiguration) async throws -> ReviewSnapshot {
         calls += 1
-        if calls == 1 { return ReviewSnapshot(pullRequests: [], updatedAt: Date().addingTimeInterval(-180)) }
+        if calls == 1 { return ReviewSnapshot(pullRequests: requests, updatedAt: Date().addingTimeInterval(-180)) }
         throw ReviewQError.http(403, "example/Project")
     }
 }

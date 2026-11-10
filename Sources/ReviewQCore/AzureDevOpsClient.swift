@@ -50,43 +50,75 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
     private let authorization: any AuthorizationProviding
     private let transport: any HTTPTransport
     private let diagnostics: DiagnosticLogger
+    private let identityCache: IdentityCache
     private static let pageSize = 100
     private static let historyConcurrency = 4
 
-    public init(keychain: any PATStoring = KeychainPATStore(), diagnostics: DiagnosticLogger = .disabled) {
+    public init(
+        keychain: any PATStoring = KeychainPATStore(), diagnostics: DiagnosticLogger = .disabled,
+        defaults: UserDefaults = .standard
+    ) {
         authorization = AzureDevOpsCredentials(keychain: keychain, diagnostics: diagnostics)
         transport = URLSessionTransport()
         self.diagnostics = diagnostics
+        identityCache = IdentityCache(defaults: defaults, diagnostics: diagnostics)
     }
 
     init(
         authorization: any AuthorizationProviding, transport: any HTTPTransport,
-        diagnostics: DiagnosticLogger = .disabled
+        diagnostics: DiagnosticLogger = .disabled, identityCache: IdentityCache = IdentityCache()
     ) {
         self.authorization = authorization
         self.transport = transport
         self.diagnostics = diagnostics
+        self.identityCache = identityCache
+    }
+
+    public func invalidateIdentityCache() async {
+        identityCache.clear()
+        await authorization.invalidate()
     }
 
     public func load(configuration: ReviewConfiguration) async throws -> ReviewSnapshot {
         let sources = try configuration.validatedSources()
-        let header = try await authorization.authorization(for: configuration)
+        let followedEmails = try configuration.validatedFollowedAuthors()
         do {
-            return try await fetch(sources: sources, configuration: configuration, header: header)
+            return try await authenticatedFetch(
+                sources: sources, followedEmails: followedEmails, configuration: configuration
+            )
         } catch let error as ReviewQError {
             if configuration.authentication == .azureCLI, case .http(401, _) = error {
+                try Task.checkCancellation()
                 await authorization.invalidate()
-                let renewed = try await authorization.authorization(for: configuration)
-                return try await fetch(sources: sources, configuration: configuration, header: renewed)
+                return try await authenticatedFetch(
+                    sources: sources, followedEmails: followedEmails, configuration: configuration
+                )
             }
             throw error
         }
     }
 
-    private func fetch(
-        sources: [ReviewSource], configuration: ReviewConfiguration, header: String
+    private func authenticatedFetch(
+        sources: [ReviewSource], followedEmails: [String], configuration: ReviewConfiguration
     ) async throws -> ReviewSnapshot {
+        let generation = identityCache.requestGeneration()
+        let header = try await authorization.authorization(for: configuration)
+        return try await fetch(
+            sources: sources, followedEmails: followedEmails, configuration: configuration,
+            header: header, cacheGeneration: generation
+        )
+    }
+
+    private func fetch(
+        sources: [ReviewSource], followedEmails: [String], configuration: ReviewConfiguration,
+        header: String, cacheGeneration: UUID
+    ) async throws -> ReviewSnapshot {
+        try Task.checkCancellation()
+        let cacheContext = try identityCache.begin(scope: IdentityCache.scope(
+            configuration: configuration, header: header, sources: sources, followedEmails: followedEmails
+        ), requestGeneration: cacheGeneration)
         var identities: [String: UUID] = [:]
+        var organizationProjects: [String: [String]] = [:]
         var pullRequests: [String: ReviewPullRequest] = [:]
         for source in sources {
             try Task.checkCancellation()
@@ -94,6 +126,11 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
             let reviewerID: UUID
             if let cached = identities[organizationKey] {
                 reviewerID = cached
+            } else if let cached = try identityCache.currentUser(
+                organization: source.organization, context: cacheContext
+            ) {
+                reviewerID = cached
+                identities[organizationKey] = cached
             } else {
                 let url = try AzureDevOpsURL.make(
                     organization: source.organization, path: ["_apis", "connectionData"],
@@ -106,6 +143,10 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                       connection.authenticatedUser.id != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                 else { throw ReviewQError.http(401, source.displayName) }
                 reviewerID = connection.authenticatedUser.id
+                try Task.checkCancellation()
+                try identityCache.storeCurrentUser(
+                    reviewerID, organization: source.organization, context: cacheContext
+                )
                 identities[organizationKey] = reviewerID
             }
             let projects: [String]
@@ -113,17 +154,105 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 projects = [project]
             } else {
                 projects = try await projectNames(source: source, header: header)
+                organizationProjects[organizationKey] = projects
             }
             for project in projects {
-                let reviews = try await pendingReviews(
+                let reviews = try await reviews(
                     source: source, project: project, reviewerID: reviewerID.uuidString,
                     includeDrafts: configuration.includeDrafts, header: header
                 )
                 for review in reviews { pullRequests[review.id] = review }
             }
         }
+        if !followedEmails.isEmpty {
+            var seenOrganizations: Set<String> = []
+            var matchedEmails: Set<String> = []
+            for source in sources where seenOrganizations.insert(source.organization.lowercased()).inserted {
+                try Task.checkCancellation()
+                let organizationKey = source.organization.lowercased()
+                guard let reviewerID = identities[organizationKey] else {
+                    throw ReviewQError.invalidResponse(source.displayName)
+                }
+                let authors = try await followedAuthors(
+                    followedEmails, source: source, header: header, cacheContext: cacheContext
+                )
+                matchedEmails.formUnion(authors.emails)
+                guard !authors.ids.isEmpty else { continue }
+                let projects: [String]
+                if let cached = organizationProjects[organizationKey] {
+                    projects = cached
+                } else {
+                    projects = try await projectNames(source: source, header: header)
+                }
+                for project in projects {
+                    for creatorID in authors.ids {
+                        let followed = try await reviews(
+                            source: source, project: project, reviewerID: reviewerID.uuidString,
+                            creatorID: creatorID, includeDrafts: configuration.includeDrafts, header: header,
+                            excludingIDs: Set(pullRequests.keys)
+                        )
+                        for review in followed { pullRequests[review.id] = review }
+                    }
+                }
+            }
+            let unresolved = followedEmails.filter { !matchedEmails.contains($0) }
+            guard unresolved.isEmpty else { throw ReviewQError.unresolvedFollowedAuthors(unresolved) }
+        }
         let sorted = pullRequests.values.sorted(by: ReviewPullRequest.newestFirst)
         return ReviewSnapshot(pullRequests: sorted)
+    }
+
+    private func followedAuthors(
+        _ emails: [String], source: ReviewSource, header: String, cacheContext: IdentityCache.Context
+    ) async throws -> (ids: [UUID], emails: Set<String>) {
+        var ids: [UUID] = []
+        var seenIDs: Set<UUID> = []
+        var matchedEmails: Set<String> = []
+        let scope = "\(source.organization) followed people"
+        for email in emails {
+            try Task.checkCancellation()
+            switch try identityCache.followedAuthor(
+                organization: source.organization, email: email, context: cacheContext
+            ) {
+            case .identity(let id):
+                matchedEmails.insert(email)
+                if seenIDs.insert(id).inserted { ids.append(id) }
+                continue
+            case .notFound:
+                continue
+            case .missing:
+                break
+            }
+            let url = try AzureDevOpsURL.make(
+                organization: source.organization, path: ["_apis", "identities"],
+                query: [
+                    URLQueryItem(name: "api-version", value: "7.1"),
+                    URLQueryItem(name: "searchFilter", value: "General"),
+                    URLQueryItem(name: "filterValue", value: email),
+                    URLQueryItem(name: "queryMembership", value: "None")
+                ],
+                identityService: true
+            )
+            let (page, response): (APIList<APIFollowedIdentity>, HTTPResult) = try await get(
+                url, header: header, source: scope, operation: .followedIdentity
+            )
+            if let continuation = response.continuationToken, !continuation.isEmpty {
+                throw ReviewQError.invalidPagination(scope)
+            }
+            let matches = Set(page.value.filter { $0.matches(email: email) }.map(\.id))
+            guard matches.count <= 1,
+                  !matches.contains(UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+            else { throw ReviewQError.invalidResponse(scope) }
+            try Task.checkCancellation()
+            try identityCache.storeFollowedAuthor(
+                matches.first, organization: source.organization, email: email, context: cacheContext
+            )
+            if let id = matches.first {
+                matchedEmails.insert(email)
+                if seenIDs.insert(id).inserted { ids.append(id) }
+            }
+        }
+        return (ids, matchedEmails)
     }
 
     private func projectNames(source: ReviewSource, header: String) async throws -> [String] {
@@ -157,8 +286,9 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
         return names
     }
 
-    private func pendingReviews(
-        source: ReviewSource, project: String, reviewerID: String, includeDrafts: Bool, header: String
+    private func reviews(
+        source: ReviewSource, project: String, reviewerID: String, creatorID: UUID? = nil,
+        includeDrafts: Bool, header: String, excludingIDs: Set<String> = []
     ) async throws -> [ReviewPullRequest] {
         let scope = "\(source.organization)/\(project)"
         var reviews: [ReviewPullRequest] = []
@@ -171,7 +301,10 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 query: [
                     URLQueryItem(name: "api-version", value: "7.1"),
                     URLQueryItem(name: "searchCriteria.status", value: "active"),
-                    URLQueryItem(name: "searchCriteria.reviewerId", value: reviewerID),
+                    URLQueryItem(
+                        name: creatorID == nil ? "searchCriteria.reviewerId" : "searchCriteria.creatorId",
+                        value: creatorID?.uuidString ?? reviewerID
+                    ),
                     URLQueryItem(name: "$top", value: String(Self.pageSize)),
                     URLQueryItem(name: "$skip", value: String(skip))
                 ]
@@ -180,15 +313,23 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 url, header: header, source: scope, operation: .pullRequests, page: skip / Self.pageSize + 1
             )
             var newIDs = 0
-            var candidates: [(request: APIPullRequest, reviewer: APIReviewer)] = []
+            var candidates: [(request: APIPullRequest, reviewer: APIReviewer?)] = []
             for request in page.value where seenIDs.insert(request.pullRequestId).inserted {
                 newIDs += 1
-                if let reviewer = request.pendingReviewer(for: reviewerID, includeDrafts: includeDrafts) {
+                if let creatorID {
+                    guard request.status.lowercased() == "active",
+                          includeDrafts || request.isDraft != true,
+                          UUID(uuidString: request.createdBy.id) == creatorID,
+                          !excludingIDs.contains(request.reviewID(source: source)) else { continue }
+                    let reviewer = request.reviewers.first { $0.id.caseInsensitiveCompare(reviewerID) == .orderedSame }
+                    candidates.append((request, reviewer))
+                } else if let reviewer = request.pendingReviewer(for: reviewerID, includeDrafts: includeDrafts) {
                     candidates.append((request, reviewer))
                 }
             }
             reviews += try await reviewsWithHistory(
-                candidates, source: source, project: project, reviewerID: reviewerID, header: header
+                candidates, source: source, project: project, reviewerID: reviewerID, header: header,
+                isFollowedOnly: creatorID != nil
             )
             if page.value.count < Self.pageSize { return reviews }
             guard newIDs > 0 else { throw ReviewQError.invalidPagination(scope) }
@@ -197,8 +338,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
     }
 
     private func reviewsWithHistory(
-        _ candidates: [(request: APIPullRequest, reviewer: APIReviewer)],
-        source: ReviewSource, project: String, reviewerID: String, header: String
+        _ candidates: [(request: APIPullRequest, reviewer: APIReviewer?)],
+        source: ReviewSource, project: String, reviewerID: String, header: String, isFollowedOnly: Bool
     ) async throws -> [ReviewPullRequest] {
         guard let identity = UUID(uuidString: reviewerID) else {
             throw ReviewQError.invalidResponse("\(source.organization)/\(project)")
@@ -209,7 +350,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 if let candidate = remaining.next() {
                     group.addTask {
                         try await reviewWithHistory(
-                            candidate, source: source, project: project, reviewerID: identity, header: header
+                            candidate, source: source, project: project, reviewerID: identity, header: header,
+                            isFollowedOnly: isFollowedOnly
                         )
                     }
                 }
@@ -220,7 +362,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 if let candidate = remaining.next() {
                     group.addTask {
                         try await reviewWithHistory(
-                            candidate, source: source, project: project, reviewerID: identity, header: header
+                            candidate, source: source, project: project, reviewerID: identity, header: header,
+                            isFollowedOnly: isFollowedOnly
                         )
                     }
                 }
@@ -230,8 +373,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
     }
 
     private func reviewWithHistory(
-        _ candidate: (request: APIPullRequest, reviewer: APIReviewer),
-        source: ReviewSource, project: String, reviewerID: UUID, header: String
+        _ candidate: (request: APIPullRequest, reviewer: APIReviewer?),
+        source: ReviewSource, project: String, reviewerID: UUID, header: String, isFollowedOnly: Bool
     ) async throws -> ReviewPullRequest {
         try Task.checkCancellation()
         let request = candidate.request
@@ -253,7 +396,7 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
         let history = try ReviewStage.fromHistory(threads.value, reviewerID: reviewerID)
         return try request.review(
             source: source, reviewer: candidate.reviewer,
-            stage: history.stage, commentResolution: history.commentResolution
+            stage: history.stage, commentResolution: history.commentResolution, isFollowedOnly: isFollowedOnly
         )
     }
 
