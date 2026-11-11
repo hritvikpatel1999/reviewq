@@ -164,6 +164,31 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                 for review in reviews { pullRequests[review.id] = review }
             }
         }
+        if configuration.showAuthoredPullRequests {
+            var seenOrganizations: Set<String> = []
+            for source in sources where seenOrganizations.insert(source.organization.lowercased()).inserted {
+                try Task.checkCancellation()
+                let organizationKey = source.organization.lowercased()
+                guard let reviewerID = identities[organizationKey] else {
+                    throw ReviewQError.invalidResponse(source.displayName)
+                }
+                let projects: [String]
+                if let cached = organizationProjects[organizationKey] {
+                    projects = cached
+                } else {
+                    projects = try await projectNames(source: source, header: header)
+                    organizationProjects[organizationKey] = projects
+                }
+                for project in projects {
+                    let authored = try await reviews(
+                        source: source, project: project, reviewerID: reviewerID.uuidString,
+                        creatorID: reviewerID, includeDrafts: configuration.includeDrafts, header: header,
+                        isAuthored: true
+                    )
+                    for request in authored { pullRequests[request.id] = request }
+                }
+            }
+        }
         if !followedEmails.isEmpty {
             var seenOrganizations: Set<String> = []
             var matchedEmails: Set<String> = []
@@ -183,9 +208,10 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                     projects = cached
                 } else {
                     projects = try await projectNames(source: source, header: header)
+                    organizationProjects[organizationKey] = projects
                 }
                 for project in projects {
-                    for creatorID in authors.ids {
+                    for creatorID in authors.ids where !configuration.showAuthoredPullRequests || creatorID != reviewerID {
                         let followed = try await reviews(
                             source: source, project: project, reviewerID: reviewerID.uuidString,
                             creatorID: creatorID, includeDrafts: configuration.includeDrafts, header: header,
@@ -288,7 +314,7 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
 
     private func reviews(
         source: ReviewSource, project: String, reviewerID: String, creatorID: UUID? = nil,
-        includeDrafts: Bool, header: String, excludingIDs: Set<String> = []
+        includeDrafts: Bool, header: String, excludingIDs: Set<String> = [], isAuthored: Bool = false
     ) async throws -> [ReviewPullRequest] {
         let scope = "\(source.organization)/\(project)"
         var reviews: [ReviewPullRequest] = []
@@ -329,7 +355,7 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
             }
             reviews += try await reviewsWithHistory(
                 candidates, source: source, project: project, reviewerID: reviewerID, header: header,
-                isFollowedOnly: creatorID != nil
+                isFollowedOnly: creatorID != nil && !isAuthored, isAuthored: isAuthored
             )
             if page.value.count < Self.pageSize { return reviews }
             guard newIDs > 0 else { throw ReviewQError.invalidPagination(scope) }
@@ -339,7 +365,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
 
     private func reviewsWithHistory(
         _ candidates: [(request: APIPullRequest, reviewer: APIReviewer?)],
-        source: ReviewSource, project: String, reviewerID: String, header: String, isFollowedOnly: Bool
+        source: ReviewSource, project: String, reviewerID: String, header: String,
+        isFollowedOnly: Bool, isAuthored: Bool
     ) async throws -> [ReviewPullRequest] {
         guard let identity = UUID(uuidString: reviewerID) else {
             throw ReviewQError.invalidResponse("\(source.organization)/\(project)")
@@ -351,7 +378,7 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                     group.addTask {
                         try await reviewWithHistory(
                             candidate, source: source, project: project, reviewerID: identity, header: header,
-                            isFollowedOnly: isFollowedOnly
+                            isFollowedOnly: isFollowedOnly, isAuthored: isAuthored
                         )
                     }
                 }
@@ -363,7 +390,7 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
                     group.addTask {
                         try await reviewWithHistory(
                             candidate, source: source, project: project, reviewerID: identity, header: header,
-                            isFollowedOnly: isFollowedOnly
+                            isFollowedOnly: isFollowedOnly, isAuthored: isAuthored
                         )
                     }
                 }
@@ -374,7 +401,8 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
 
     private func reviewWithHistory(
         _ candidate: (request: APIPullRequest, reviewer: APIReviewer?),
-        source: ReviewSource, project: String, reviewerID: UUID, header: String, isFollowedOnly: Bool
+        source: ReviewSource, project: String, reviewerID: UUID, header: String,
+        isFollowedOnly: Bool, isAuthored: Bool
     ) async throws -> ReviewPullRequest {
         try Task.checkCancellation()
         let request = candidate.request
@@ -393,11 +421,60 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
         if let continuation = response.continuationToken, !continuation.isEmpty {
             throw ReviewQError.invalidPagination(scope)
         }
+        if isAuthored {
+            let evaluations = try await approvalPolicies(for: request, source: source, header: header)
+            let status = try AuthoredPullRequestStatus.from(
+                threads: threads.value, reviewers: request.reviewers, evaluations: evaluations
+            )
+            return try request.review(
+                source: source, reviewer: nil, stage: .firstReview, authoredStatus: status
+            )
+        }
         let history = try ReviewStage.fromHistory(threads.value, reviewerID: reviewerID)
         return try request.review(
             source: source, reviewer: candidate.reviewer,
             stage: history.stage, commentResolution: history.commentResolution, isFollowedOnly: isFollowedOnly
         )
+    }
+
+    private func approvalPolicies(
+        for request: APIPullRequest, source: ReviewSource, header: String
+    ) async throws -> [APIPolicyEvaluation] {
+        let project = request.repository.project
+        let scope = "\(source.organization)/\(project.name) reviewer approvals"
+        let artifactID = "vstfs:///CodeReview/CodeReviewId/\(project.id)/\(request.pullRequestId)"
+        var evaluations: [APIPolicyEvaluation] = []
+        var seenIDs: Set<UUID> = []
+        var skip = 0
+        while true {
+            try Task.checkCancellation()
+            let url = try AzureDevOpsURL.make(
+                organization: source.organization, path: [project.name, "_apis", "policy", "evaluations"],
+                query: [
+                    URLQueryItem(name: "api-version", value: "7.1-preview.1"),
+                    URLQueryItem(name: "artifactId", value: artifactID),
+                    URLQueryItem(name: "includeNotApplicable", value: "true"),
+                    URLQueryItem(name: "$top", value: String(Self.pageSize)),
+                    URLQueryItem(name: "$skip", value: String(skip))
+                ]
+            )
+            let (page, response): (APIList<APIPolicyEvaluation>, HTTPResult) = try await get(
+                url, header: header, source: scope, operation: .reviewerPolicies, page: skip / Self.pageSize + 1
+            )
+            guard response.continuationToken?.isEmpty != false else {
+                throw ReviewQError.invalidPagination(scope)
+            }
+            let count = evaluations.count
+            for evaluation in page.value {
+                guard evaluation.artifactId.removingPercentEncoding?.caseInsensitiveCompare(artifactID) == .orderedSame else {
+                    throw ReviewQError.invalidResponse(scope)
+                }
+                if seenIDs.insert(evaluation.evaluationId).inserted { evaluations.append(evaluation) }
+            }
+            if page.value.count < Self.pageSize { return evaluations }
+            guard evaluations.count > count else { throw ReviewQError.invalidPagination(scope) }
+            skip += page.value.count
+        }
     }
 
     private func get<Value: Decodable & Sendable>(

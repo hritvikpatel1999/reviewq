@@ -21,10 +21,10 @@ func pullRequestJSON(
     reviewer: String = reviewerID, author: String = authorID,
     declined: Bool = false, date: String = "2026-10-01T12:30:00.1234567Z",
     hasReviewer: Bool = true, repository: String = "Repository", repositoryID: String = "repo-id",
-    project: String = "Project"
+    project: String = "Project", reviewersJSON: String? = nil
 ) -> String {
-    let reviewers = hasReviewer
-        ? #"{"id":"\#(reviewer)","vote":\#(vote),"isRequired":true,"hasDeclined":\#(declined)}"# : ""
+    let reviewers = reviewersJSON ?? (hasReviewer
+        ? #"{"id":"\#(reviewer)","vote":\#(vote),"isRequired":true,"hasDeclined":\#(declined)}"# : "")
     return """
     {
       "pullRequestId":\(number),"title":"Review fixture \(number)","status":"\(status)",
@@ -42,6 +42,29 @@ func pullRequestsResponse(_ items: [String], status: Int = 200) -> HTTPResult {
 
 func reviewThreadsResponse(_ items: [String] = [], status: Int = 200) -> HTTPResult {
     HTTPResult(data: Data("{\"value\":[\(items.joined(separator: ","))]}".utf8), status: status)
+}
+
+func policyEvaluationJSON(
+    number: Int = 1, typeID: String = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd",
+    status: String = "approved", enabled: Bool = true, blocking: Bool = true, deleted: Bool = false,
+    evaluationID: String = UUID().uuidString, projectID: String = "project-id"
+) -> String {
+    """
+    {"evaluationId":"\(evaluationID)",
+     "artifactId":"vstfs:///CodeReview/CodeReviewId/\(projectID)/\(number)",
+     "status":"\(status)",
+     "configuration":{"isEnabled":\(enabled),"isBlocking":\(blocking),"isDeleted":\(deleted),
+                      "type":{"id":"\(typeID)"}}}
+    """
+}
+
+func policyEvaluationsResponse(
+    _ items: [String] = [], status: Int = 200, continuation: String? = nil
+) -> HTTPResult {
+    HTTPResult(
+        data: Data("{\"value\":[\(items.joined(separator: ","))]}".utf8),
+        status: status, continuationToken: continuation
+    )
 }
 
 func followedIdentityJSON(
@@ -118,15 +141,23 @@ func reviewCommentThreadJSON(
 actor StubTransport: HTTPTransport {
     private var responses: [HTTPResult]
     private var histories: [Int: HTTPResult]
+    private var policies: [Int: [HTTPResult]]
     private(set) var requests: [URLRequest] = []
 
-    init(_ responses: [HTTPResult], histories: [Int: HTTPResult] = [:]) {
+    init(
+        _ responses: [HTTPResult], histories: [Int: HTTPResult] = [:], policies: [Int: [HTTPResult]] = [:]
+    ) {
         self.responses = responses
         self.histories = histories
+        self.policies = policies
     }
 
     func setHistory(_ response: HTTPResult, for number: Int) {
         histories[number] = response
+    }
+
+    func setPolicies(_ responses: [HTTPResult], for number: Int) {
+        policies[number] = responses
     }
 
     func send(_ request: URLRequest) async throws -> HTTPResult {
@@ -136,6 +167,17 @@ actor StubTransport: HTTPTransport {
                 throw ReviewQError.invalidResponse("Invalid synthetic review-history URL")
             }
             return histories[number] ?? reviewThreadsResponse()
+        }
+        if let url = request.url, url.path.hasSuffix("/policy/evaluations") {
+            let artifactID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "artifactId" }?.value
+            guard let number = artifactID?.split(separator: "/").last.flatMap({ Int($0) }),
+                  var responses = policies[number], !responses.isEmpty else {
+                throw ReviewQError.invalidResponse("Unexpected synthetic reviewer-policy request")
+            }
+            let response = responses.removeFirst()
+            policies[number] = responses
+            return response
         }
         guard !responses.isEmpty else { throw ReviewQError.invalidResponse("Unexpected test request") }
         return responses.removeFirst()

@@ -7,6 +7,7 @@ struct DashboardView: View {
     @ObservedObject var app: AppDelegate
     @State private var expandedRepositoryIDs: Set<String> = []
     @State private var isFollowedPeopleExpanded = false
+    @State private var isAuthoredExpanded = false
 
     private var groups: [RepositoryGroup] {
         RepositoryGroup.grouping(store.snapshot?.pullRequests ?? [])
@@ -14,6 +15,11 @@ struct DashboardView: View {
 
     private var followedRequests: [ReviewPullRequest] {
         (store.snapshot?.pullRequests ?? []).filter(\.isFollowedOnly).sorted(by: ReviewPullRequest.newestFirst)
+    }
+
+    private var authoredRequests: [ReviewPullRequest] {
+        (store.snapshot?.pullRequests ?? []).filter { $0.authoredStatus != nil }
+            .sorted(by: ReviewPullRequest.newestFirst)
     }
 
     var body: some View {
@@ -51,7 +57,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("ReviewQ").font(.headline)
                 if let snapshot = store.snapshot {
-                    Text("\(snapshot.pullRequests.count) pending reviews").font(.caption).foregroundStyle(.secondary)
+                    Text("\(snapshot.pendingReviewCount) pending reviews").font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("Your Azure DevOps review queue").font(.caption).foregroundStyle(.secondary)
                 }
@@ -106,7 +112,7 @@ struct DashboardView: View {
                 }
             }
             .padding(24)
-        } else if groups.isEmpty && !store.configuration.followPeople {
+        } else if groups.isEmpty && !store.configuration.followPeople && !store.configuration.showAuthoredPullRequests {
             VStack(spacing: 12) {
                 Image(systemName: store.errorMessage == nil ? "checkmark.circle" : "clock.badge.exclamationmark")
                     .font(.system(size: 42))
@@ -155,6 +161,12 @@ struct DashboardView: View {
                             isLaunchingReview: app.isLaunchingReview
                         )
                     }
+                    if store.configuration.showAuthoredPullRequests {
+                        AuthoredPullRequestsSection(
+                            requests: authoredRequests, isExpanded: $isAuthoredExpanded,
+                            open: { app.open($0.url) }
+                        )
+                    }
                 }
                 .padding(12)
             }
@@ -181,7 +193,7 @@ struct RepositoryGroup: Identifiable {
     let requests: [ReviewPullRequest]
 
     static func grouping(_ requests: [ReviewPullRequest]) -> [RepositoryGroup] {
-        Dictionary(grouping: requests.filter { !$0.isFollowedOnly }, by: \.groupID).map { group in
+        Dictionary(grouping: requests.filter { !$0.isFollowedOnly && $0.authoredStatus == nil }, by: \.groupID).map { group in
             let repository = group.value[0]
             return RepositoryGroup(
                 id: group.key, repository: repository.repository,
@@ -190,6 +202,46 @@ struct RepositoryGroup: Identifiable {
             )
         }
         .sorted { $0.id < $1.id }
+    }
+}
+
+struct AuthoredPullRequestsSection: View {
+    let requests: [ReviewPullRequest]
+    @Binding var isExpanded: Bool
+    let open: (ReviewPullRequest) -> Void
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 6) {
+                if requests.isEmpty {
+                    Text("No active PRs authored by you.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(requests) { request in
+                        PullRequestRow(request: request, open: { open(request) })
+                    }
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 10) {
+                Label("I'm the Author", systemImage: "person.crop.circle")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                Text("\(requests.count)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.tint)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .accessibilityLabel("\(requests.count) authored pull requests")
+            }
+        }
+        .disclosureGroupStyle(ReviewDisclosureStyle(
+            accessibilityHint: "Show or hide pull requests authored by you"
+        ))
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("authored-pull-requests-section")
     }
 }
 
@@ -316,10 +368,29 @@ private struct ReviewDisclosureStyle: DisclosureGroupStyle {
 struct PullRequestRow: View {
     let request: ReviewPullRequest
     let open: () -> Void
-    let openInEdge: () -> Void
-    let review: (ReviewAssistant) -> Void
-    let isLaunchingReview: Bool
+    private let actions: Actions
     @State private var isHovered = false
+
+    private enum Actions {
+        case browser
+        case review(openInEdge: () -> Void, review: (ReviewAssistant) -> Void, isLaunching: Bool)
+    }
+
+    init(request: ReviewPullRequest, open: @escaping () -> Void) {
+        self.request = request
+        self.open = open
+        actions = .browser
+    }
+
+    init(
+        request: ReviewPullRequest, open: @escaping () -> Void, openInEdge: @escaping () -> Void,
+        review: @escaping (ReviewAssistant) -> Void, isLaunchingReview: Bool
+    ) {
+        self.request = request
+        self.open = open
+        actions = request.authoredStatus == nil
+            ? .review(openInEdge: openInEdge, review: review, isLaunching: isLaunchingReview) : .browser
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -336,10 +407,19 @@ struct PullRequestRow: View {
                             Text("Draft").font(.caption2).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: true, vertical: false)
                         }
-                        Text(request.reviewStageLabel).font(.caption2).foregroundStyle(.secondary)
-                            .lineLimit(1).minimumScaleFactor(0.85)
-                            .help(request.reviewStageExplanation)
-                        Spacer(minLength: 84)
+                        if request.authoredStatus != nil {
+                            if let label = request.authoredStatusLabel {
+                                Text(label).font(.caption2)
+                                    .foregroundStyle(request.isMergeReady ? Color.green : Color.secondary)
+                                    .lineLimit(1).minimumScaleFactor(0.85)
+                                    .help(request.authoredStatusExplanation)
+                            }
+                        } else {
+                            Text(request.reviewStageLabel).font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1).minimumScaleFactor(0.85)
+                                .help(request.reviewStageExplanation)
+                        }
+                        Spacer(minLength: request.authoredStatus == nil ? 84 : 28)
                     }
                     .frame(height: 22)
                     Text(request.title).font(.system(size: 13, weight: .medium)).lineLimit(2)
@@ -356,23 +436,37 @@ struct PullRequestRow: View {
                 .contentShape(RoundedRectangle(cornerRadius: 9))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Pull request: \(request.title), by \(request.authorLabel), \(request.reviewStageLabel)")
+            .accessibilityLabel(
+                "Pull request: \(request.title), by \(request.authorLabel)"
+                    + (request.authoredStatus == nil
+                       ? ", \(request.reviewStageLabel)" : request.authoredStatusLabel.map { ", \($0)" } ?? "")
+            )
             .help("Open pull request in your browser")
 
             HStack(spacing: 6) {
-                Button(action: openInEdge) {
-                    EdgeBrowserIcon().frame(width: 22, height: 22).contentShape(Rectangle())
-                }
-                .accessibilityLabel("Open in Microsoft Edge: \(request.title)")
-                .help("Open PR in Microsoft Edge")
-                ForEach(ReviewAssistant.allCases, id: \.self) { assistant in
-                    Button { review(assistant) } label: {
-                        ReviewAssistantIcon(assistant: assistant)
+                switch actions {
+                case .browser:
+                    Button(action: open) {
+                        Image(systemName: "globe")
                             .frame(width: 22, height: 22).contentShape(Rectangle())
                     }
-                    .disabled(isLaunchingReview)
-                    .accessibilityLabel("Review with \(assistant.name): \(request.title)")
-                    .help("Review with \(assistant.name)")
+                    .accessibilityLabel("Open in browser: \(request.title)")
+                    .help("Open PR in your browser")
+                case .review(let openInEdge, let review, let isLaunching):
+                    Button(action: openInEdge) {
+                        EdgeBrowserIcon().frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Open in Microsoft Edge: \(request.title)")
+                    .help("Open PR in Microsoft Edge")
+                    ForEach(ReviewAssistant.allCases, id: \.self) { assistant in
+                        Button { review(assistant) } label: {
+                            ReviewAssistantIcon(assistant: assistant)
+                                .frame(width: 22, height: 22).contentShape(Rectangle())
+                        }
+                        .disabled(isLaunching)
+                        .accessibilityLabel("Review with \(assistant.name): \(request.title)")
+                        .help("Review with \(assistant.name)")
+                    }
                 }
             }
             .buttonStyle(PRIconButtonStyle())

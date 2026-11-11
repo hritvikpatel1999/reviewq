@@ -25,7 +25,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
-    case identity, followedIdentity, identityCache, projects, pullRequests, reviewHistory, reviews
+    case identity, followedIdentity, identityCache, projects, pullRequests, reviewHistory, reviewerPolicies, reviews
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
     case scout, copilot
     case shortcut

@@ -144,6 +144,84 @@ final class RepositoryDropdownTests: XCTestCase {
         }
     }
 
+    func testAuthorSectionTogglesKeepsExpansionAcrossRefreshAndOpensItsCard() async throws {
+        let state = DropdownState()
+        let status = AuthoredPullRequestStatus(activeCommentCount: 2, hasRequiredApprovals: false)
+        let original = try [request(number: 1, authoredStatus: status)]
+        let (host, window) = makeHost(AuthorDropdownHarness(requests: original, state: state))
+        defer { window.close() }
+        try await settle(host)
+        let collapsedHeight = host.intrinsicContentSize.height
+        XCTAssertFalse(state.isExpanded)
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+        let originalHeight = host.intrinsicContentSize.height
+        XCTAssertGreaterThan(originalHeight, collapsedHeight + 50)
+
+        let refreshed = try [
+            request(number: 2, authoredStatus: status), request(number: 1, authoredStatus: status)
+        ]
+        host.rootView = AuthorDropdownHarness(requests: refreshed, state: state)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+        XCTAssertGreaterThan(host.intrinsicContentSize.height, originalHeight + 50)
+        window.orderOut(nil)
+        window.makeKeyAndOrderFront(nil)
+        try await settle(host)
+        XCTAssertTrue(state.isExpanded)
+
+        let expandedHeight = host.intrinsicContentSize.height
+        let rowHeight = (expandedHeight - collapsedHeight - 10 - 6) / 2
+        let header = headerCenter(in: host, collapsedHeight: collapsedHeight)
+        let direction: CGFloat = host.isFlipped ? 1 : -1
+        try click(NSPoint(
+            x: header.x, y: header.y + direction * (collapsedHeight / 2 - 12 + 10 + rowHeight / 2)
+        ), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(state.openedRequest, refreshed.first?.id)
+        try click(headerCenter(in: host, collapsedHeight: collapsedHeight), in: host, window: window)
+        try await settle(host)
+        XCTAssertFalse(state.isExpanded)
+        host.rootView = AuthorDropdownHarness(requests: original, state: state)
+        try await settle(host)
+        XCTAssertFalse(state.isExpanded)
+        XCTAssertEqual(host.intrinsicContentSize.height, collapsedHeight, accuracy: 1)
+    }
+
+    func testAuthoredCardsHaveOnlyTheBrowserActionEvenWhileAnAIReviewIsLaunching() async throws {
+        _ = NSApplication.shared
+        let request = try request(
+            number: 42, authoredStatus: AuthoredPullRequestStatus(activeCommentCount: 0, hasRequiredApprovals: true)
+        )
+        var opened = 0
+        var edgeOpened = 0
+        var assistants: [ReviewAssistant] = []
+        let (host, window) = makeHost(PullRequestRow(
+            request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
+            review: { assistants.append($0) }, isLaunchingReview: true
+        ).frame(width: 392))
+        defer { window.close() }
+        try await settle(host)
+        let top = host.isFlipped
+            ? host.bounds.midY - host.intrinsicContentSize.height / 2
+            : host.bounds.midY + host.intrinsicContentSize.height / 2
+        let direction: CGFloat = host.isFlipped ? 1 : -1
+        let left = host.bounds.midX - 196
+        try click(NSPoint(x: left + 371, y: top + direction * 21), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(opened, 1)
+        try click(NSPoint(x: left + 100, y: top + direction * 48), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(opened, 2)
+        for x in [315.0, 343.0] {
+            try click(NSPoint(x: left + x, y: top + direction * 21), in: host, window: window)
+        }
+        try await settle(host)
+        XCTAssertTrue(assistants.isEmpty)
+        XCTAssertEqual(edgeOpened, 0)
+    }
+
     private func exercisePRCardActions(isFollowedOnly: Bool) async throws {
         _ = NSApplication.shared
         let request = try request(number: 42, isFollowedOnly: isFollowedOnly)
@@ -201,7 +279,7 @@ final class RepositoryDropdownTests: XCTestCase {
 
     private func request(
         number: Int, organization: String = "example", repository: String = "Service",
-        isFollowedOnly: Bool = false
+        isFollowedOnly: Bool = false, authoredStatus: AuthoredPullRequestStatus? = nil
     ) throws -> ReviewPullRequest {
         ReviewPullRequest(
             number: number, title: "Synthetic review \(number)", author: "Fixture author",
@@ -209,7 +287,8 @@ final class RepositoryDropdownTests: XCTestCase {
             repository: repository, repositoryID: repository.lowercased(),
             createdAt: Date(timeIntervalSince1970: TimeInterval(number)),
             url: try XCTUnwrap(URL(string: "https://dev.azure.com/\(organization)/Project/_git/repo/pullrequest/\(number)")),
-            isRequired: false, isDraft: false, reviewStage: .firstReview, isFollowedOnly: isFollowedOnly
+            isRequired: false, isDraft: false, reviewStage: .firstReview, isFollowedOnly: isFollowedOnly,
+            authoredStatus: authoredStatus
         )
     }
 
@@ -347,6 +426,19 @@ private struct PeopleDropdownHarness: View {
             requests: requests, isExpanded: $state.isExpanded,
             open: { state.openedRequest = $0.id }, openInEdge: { _ in },
             review: { _, _ in }, isLaunchingReview: false
+        )
+        .frame(width: 416)
+    }
+
+}
+
+private struct AuthorDropdownHarness: View {
+    let requests: [ReviewPullRequest]
+    @ObservedObject var state: DropdownState
+
+    var body: some View {
+        AuthoredPullRequestsSection(
+            requests: requests, isExpanded: $state.isExpanded, open: { state.openedRequest = $0.id }
         )
         .frame(width: 416)
     }
