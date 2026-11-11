@@ -124,12 +124,14 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
     public let reviewStage: ReviewStage
     public let commentResolution: ReviewCommentResolution?
     public let isFollowedOnly: Bool
+    public let authoredStatus: AuthoredPullRequestStatus?
 
     public init(
         number: Int, title: String, author: String, organization: String, project: String,
         repository: String, repositoryID: String, createdAt: Date, url: URL,
         isRequired: Bool, isDraft: Bool, reviewStage: ReviewStage,
-        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false
+        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false,
+        authoredStatus: AuthoredPullRequestStatus? = nil
     ) {
         self.number = number
         self.title = title
@@ -145,11 +147,31 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
         self.reviewStage = reviewStage
         self.commentResolution = commentResolution
         self.isFollowedOnly = isFollowedOnly
+        self.authoredStatus = authoredStatus
     }
 
     public var id: String { Self.identifier(organization: organization, repositoryID: repositoryID, number: number) }
     public var groupID: String { "\(organization)/\(project)/\(repository)" }
-    public var authorLabel: String { isFollowedOnly ? "\(author) in \(repository)" : author }
+    public var authorLabel: String {
+        isFollowedOnly || authoredStatus != nil ? "\(author) in \(repository)" : author
+    }
+
+    public var isMergeReady: Bool {
+        guard let authoredStatus else { return false }
+        return !isDraft && authoredStatus.hasRequiredApprovals && authoredStatus.activeCommentCount == 0
+    }
+
+    public var authoredStatusLabel: String? {
+        guard let authoredStatus else { return nil }
+        if authoredStatus.activeCommentCount > 0 { return "\(authoredStatus.activeCommentCount) Active Comments" }
+        return isMergeReady ? "Merge Ready" : nil
+    }
+
+    public var authoredStatusExplanation: String {
+        "Active Comments counts unresolved discussion threads (including pending), not replies or system events. "
+            + "Merge Ready means required reviewer approvals are met and no active comments remain on a non-draft PR. "
+            + "Builds and other merge requirements are not checked."
+    }
 
     static func identifier(organization: String, repositoryID: String, number: Int) -> String {
         "\(organization.lowercased())/\(repositoryID.lowercased())/\(number)"
@@ -182,6 +204,10 @@ public struct ReviewSnapshot: Equatable, Sendable {
     public init(pullRequests: [ReviewPullRequest], updatedAt: Date = Date()) {
         self.pullRequests = pullRequests
         self.updatedAt = updatedAt
+    }
+
+    public var pendingReviewCount: Int {
+        pullRequests.filter { $0.authoredStatus == nil }.count
     }
 }
 
@@ -278,7 +304,8 @@ struct APIPullRequest: Decodable, Sendable {
 
     func review(
         source: ReviewSource, reviewer: APIReviewer?, stage: ReviewStage,
-        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false
+        commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false,
+        authoredStatus: AuthoredPullRequestStatus? = nil
     ) throws -> ReviewPullRequest {
         let url = try AzureDevOpsURL.make(
             organization: source.organization,
@@ -290,7 +317,8 @@ struct APIPullRequest: Decodable, Sendable {
             repository: repository.name, repositoryID: repository.id,
             createdAt: creationDate, url: url,
             isRequired: reviewer?.isRequired == true, isDraft: isDraft == true,
-            reviewStage: stage, commentResolution: commentResolution, isFollowedOnly: isFollowedOnly
+            reviewStage: stage, commentResolution: commentResolution, isFollowedOnly: isFollowedOnly,
+            authoredStatus: authoredStatus
         )
     }
 }

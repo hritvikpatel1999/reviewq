@@ -32,6 +32,7 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
     public var showCount = true
     public var followPeople = false
     public var followedAuthorEmails = ""
+    public var showAuthoredPullRequests = false
     public var scoutAdditionalInstructions = ""
     public var copilotAdditionalInstructions = ""
 
@@ -40,6 +41,7 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sourceURLs, authentication, tenantID, refreshInterval, includeDrafts, showCount
         case followPeople, followedAuthorEmails
+        case showAuthoredPullRequests
         case scoutAdditionalInstructions, copilotAdditionalInstructions
     }
 
@@ -55,6 +57,8 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
             ? try container.decode(Bool.self, forKey: .followPeople) : false
         followedAuthorEmails = container.contains(.followedAuthorEmails)
             ? try container.decode(String.self, forKey: .followedAuthorEmails) : ""
+        showAuthoredPullRequests = container.contains(.showAuthoredPullRequests)
+            ? try container.decode(Bool.self, forKey: .showAuthoredPullRequests) : false
         scoutAdditionalInstructions = container.contains(.scoutAdditionalInstructions)
             ? try container.decode(String.self, forKey: .scoutAdditionalInstructions) : ""
         copilotAdditionalInstructions = container.contains(.copilotAdditionalInstructions)

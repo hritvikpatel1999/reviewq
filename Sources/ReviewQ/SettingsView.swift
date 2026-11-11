@@ -36,6 +36,7 @@ struct SettingsView: View {
                     sources
                     authentication
                     FollowedPeopleSettings(isEnabled: $draft.followPeople, emails: $draft.followedAuthorEmails)
+                    AuthoredPullRequestsSettings(isEnabled: $draft.showAuthoredPullRequests)
                     additionalInstructions
                     preferences
                     startup
@@ -173,7 +174,7 @@ struct SettingsView: View {
                 }
                 Toggle("Show pending count in the menu bar", isOn: $draft.showCount)
                 Toggle("Include draft pull requests", isOn: $draft.includeDrafts)
-                Text("Repository sections show active, directly assigned PRs with no vote from you. Following people adds a separate section.")
+                Text("Repository sections show active, directly assigned PRs with no vote from you. Following people and authored PRs add separate optional sections.")
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Text("Command-Option-Q opens or closes the review queue from any app.")
@@ -270,6 +271,26 @@ struct SettingsView: View {
             formError = error.localizedDescription
             didSave = false
         }
+    }
+}
+
+struct AuthoredPullRequestsSettings: View {
+    @Binding var isEnabled: Bool
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Show PRs I've authored", isOn: $isEnabled)
+                    .accessibilityIdentifier("authored-pull-requests-toggle")
+                Text("Off by default. Shows your active PRs across accessible projects in your configured organizations. The draft preference also applies.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Shows active discussion counts and Merge Ready when required approvals are met with no active comments. Build status is not checked. Browser links only.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Adds read-only PR, discussion, and reviewer-policy requests only while enabled. PATs need Code (Read) and Project and Team (Read).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: { Label("I'm the Author", systemImage: "person.crop.circle") }
     }
 }
 

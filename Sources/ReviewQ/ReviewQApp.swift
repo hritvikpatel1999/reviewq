@@ -362,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         if let error = store.errorMessage {
             description = "ReviewQ - refresh error: \(error)"
         } else if let snapshot = store.snapshot {
-            description = "ReviewQ - \(snapshot.pullRequests.count) pull requests need your review"
+            description = "ReviewQ - \(snapshot.pendingReviewCount) pull requests need your review"
         } else {
             description = store.configuration.hasSources ? "ReviewQ - loading reviews" : "ReviewQ - connect Azure DevOps"
         }

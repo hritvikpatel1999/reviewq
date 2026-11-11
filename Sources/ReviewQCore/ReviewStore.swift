@@ -59,12 +59,12 @@ public final class ReviewStore: ObservableObject {
 
     public var menuBarTitle: String {
         if errorMessage != nil {
-            if configuration.showCount, let snapshot { return " \(snapshot.pullRequests.count) !" }
+            if configuration.showCount, let snapshot { return " \(snapshot.pendingReviewCount) !" }
             return " !"
         }
         guard configuration.hasSources else { return "" }
         guard let snapshot else { return " ..." }
-        return configuration.showCount ? " \(snapshot.pullRequests.count)" : ""
+        return configuration.showCount ? " \(snapshot.pendingReviewCount)" : ""
     }
 
     public func start() {
@@ -132,7 +132,7 @@ public final class ReviewStore: ObservableObject {
                 durationMilliseconds: DiagnosticTiming.milliseconds(since: started),
                 count: result.pullRequests.count
             )
-            logger.notice("Review refresh succeeded: \(result.pullRequests.count, privacy: .public) pending reviews.")
+            logger.notice("Review refresh succeeded: \(result.pullRequests.count, privacy: .public) pull requests.")
         } catch is CancellationError {
             diagnostics.log(
                 .info, .refreshCancelled, operation: .reviews, cycleID: cycleID,

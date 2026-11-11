@@ -54,6 +54,81 @@ final class DashboardLayoutTests: XCTestCase {
         XCTAssertTrue(RepositoryGroup.grouping([followed]).isEmpty)
     }
 
+    func testAuthoredRequestsAreNotGroupedAsAssignedReviews() {
+        let assigned = fixture(number: 1)
+        let authored = fixture(
+            number: 2, authoredStatus: AuthoredPullRequestStatus(activeCommentCount: 0, hasRequiredApprovals: true)
+        )
+        XCTAssertEqual(RepositoryGroup.grouping([assigned, authored]).first?.requests, [assigned])
+        XCTAssertTrue(RepositoryGroup.grouping([authored]).isEmpty)
+        XCTAssertEqual(ReviewSnapshot(pullRequests: [assigned, authored]).pendingReviewCount, 1)
+    }
+
+    func testAuthoredSectionIsOptInAndBelowRepositoryAndPeopleSections() async throws {
+        for enabled in [false, true] {
+            let name = "ReviewQ-authored-layout-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+            defer { defaults.removePersistentDomain(forName: name) }
+            let store = try makeStore(
+                defaults: defaults, followPeople: true, showAuthored: enabled, requests: [
+                    fixture(number: 1, repository: "Alpha"),
+                    fixture(number: 2, isFollowedOnly: true),
+                    fixture(number: 3, authoredStatus: AuthoredPullRequestStatus(activeCommentCount: 2, hasRequiredApprovals: false))
+                ]
+            )
+            await store.refresh()
+            let lines = try recognize(
+                await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
+            )
+            XCTAssertEqual(lines.joined().contains("I'm the Author"), enabled, "\(lines)")
+            if enabled {
+                let author = try XCTUnwrap(lines.firstIndex { $0.contains("I'm the Author") }, "\(lines)")
+                for label in ["Alpha", "People you follow"] {
+                    XCTAssertLessThan(try XCTUnwrap(lines.firstIndex { $0.contains(label) }, "\(lines)"), author)
+                }
+                XCTAssertFalse(lines.joined().contains("Active Comments"), "The author section starts collapsed.")
+            }
+        }
+    }
+
+    func testEmptyAuthorSectionIsVisibleWhenEnabledWithoutShowingCaughtUp() async throws {
+        let name = "ReviewQ-empty-authored-layout-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = try makeStore(defaults: defaults, showAuthored: true)
+        await store.refresh()
+        let lines = try recognize(
+            await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
+        )
+        XCTAssertTrue(lines.joined().contains("I'm the Author"), "\(lines)")
+        XCTAssertFalse(lines.joined().contains("caught up"), "\(lines)")
+        let expanded = try recognize(render(
+            AuthoredPullRequestsSection(requests: [], isExpanded: .constant(true), open: { _ in })
+                .frame(width: 416)
+        ), level: .fast)
+        XCTAssertTrue(expanded.joined().localizedCaseInsensitiveContains("No active PRs authored by you"), "\(expanded)")
+    }
+
+    func testAuthoredCardsShowOnlyTheirOwnStatusAndHideZeroCommentsWithoutChangingHeight() throws {
+        var heights: Set<Int> = []
+        for (comments, approvals, label) in [
+            (2, true, "2 Active Comments"), (0, true, "Merge Ready"), (0, false, "")
+        ] {
+            let request = fixture(
+                authoredStatus: AuthoredPullRequestStatus(activeCommentCount: comments, hasRequiredApprovals: approvals)
+            )
+            let image = try render(PullRequestRow(request: request, open: {}).frame(width: 392))
+            heights.insert(image.height)
+            let text = try recognize(image, level: .fast).joined(separator: " ")
+            if !label.isEmpty { XCTAssertTrue(text.contains(label), text) }
+            XCTAssertFalse(text.contains("First Review"), text)
+            XCTAssertFalse(text.contains("0 Active Comments"), text)
+            XCTAssertEqual(text.contains("Merge Ready"), comments == 0 && approvals, text)
+            XCTAssertTrue(text.contains("A reviewer in Service"), text)
+        }
+        XCTAssertEqual(heights.count, 1)
+    }
+
     func testFollowedAuthorShowsOnlyRepositoryOnTheSameLineWithoutChangingCardHeight() throws {
         var heights: Set<Int> = []
         for followed in [false, true] {
@@ -200,7 +275,8 @@ final class DashboardLayoutTests: XCTestCase {
         number: Int = 8675309, createdAt: TimeInterval = 1,
         stage: ReviewStage = .firstReview, draft: Bool = false, required: Bool = false,
         commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false,
-        repository: String = "Service", title: String = "A compact pull request row"
+        repository: String = "Service", title: String = "A compact pull request row",
+        authoredStatus: AuthoredPullRequestStatus? = nil
     ) -> ReviewPullRequest {
         ReviewPullRequest(
             number: number, title: title, author: "A reviewer",
@@ -208,12 +284,13 @@ final class DashboardLayoutTests: XCTestCase {
             createdAt: Date(timeIntervalSince1970: createdAt),
             url: URL(string: "https://dev.azure.com/example/Project/_git/service/pullrequest/\(number)")!,
             isRequired: required, isDraft: draft, reviewStage: stage, commentResolution: commentResolution,
-            isFollowedOnly: isFollowedOnly
+            isFollowedOnly: isFollowedOnly, authoredStatus: authoredStatus
         )
     }
 
     private func makeStore(
-        defaults: UserDefaults, followPeople: Bool = false, requests: [ReviewPullRequest] = []
+        defaults: UserDefaults, followPeople: Bool = false, showAuthored: Bool = false,
+        requests: [ReviewPullRequest] = []
     ) throws -> ReviewStore {
         let store = ReviewStore(
             defaults: defaults, keychain: NoPATStore(), loader: LayoutReviewLoader(requests: requests)
@@ -221,6 +298,7 @@ final class DashboardLayoutTests: XCTestCase {
         var settings = ReviewConfiguration()
         settings.sourceURLs = "https://dev.azure.com/example/Project"
         settings.followPeople = followPeople
+        settings.showAuthoredPullRequests = showAuthored
         settings.followedAuthorEmails = followPeople ? "alex@example.com" : ""
         try store.save(settings)
         return store

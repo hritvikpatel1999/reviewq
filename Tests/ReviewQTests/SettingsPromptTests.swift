@@ -49,6 +49,44 @@ final class SettingsPromptTests: XCTestCase {
         XCTAssertTrue(lines.map(\.text).joined(separator: " ").contains("Enter at least one email"), "\(lines)")
     }
 
+    func testAuthoredSettingsToggleUpdatesItsDraftBinding() async throws {
+        _ = NSApplication.shared
+        let state = AuthoredSettingsState()
+        let host = NSHostingView(rootView: AuthoredSettingsHarness(state: state).frame(width: 560))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 260),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        await Task.yield()
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(200))
+        let top = host.isFlipped
+            ? host.bounds.midY - host.intrinsicContentSize.height / 2
+            : host.bounds.midY + host.intrinsicContentSize.height / 2
+        let direction: CGFloat = host.isFlipped ? 1 : -1
+        let location = host.convert(NSPoint(x: 80, y: top + direction * 38), to: nil)
+        XCTAssertFalse(state.configuration.showAuthoredPullRequests)
+        for expected in [true, false] {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type, location: location, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0
+                ))
+                window.sendEvent(event)
+            }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(state.configuration.showAuthoredPullRequests, expected)
+            XCTAssertEqual(state.configuration.sourceURLs, "")
+            XCTAssertFalse(state.configuration.followPeople)
+        }
+    }
+
     private func captureFollowSettings(enabled: Bool, emails: String) async throws -> CGImage {
         _ = NSApplication.shared
         let host = NSHostingView(rootView:
@@ -78,6 +116,19 @@ final class SettingsPromptTests: XCTestCase {
         let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: bitmap)
         return try XCTUnwrap(bitmap.cgImage)
+    }
+
+    @MainActor
+    private final class AuthoredSettingsState: ObservableObject {
+        @Published var configuration = ReviewConfiguration()
+    }
+
+    private struct AuthoredSettingsHarness: View {
+        @ObservedObject var state: AuthoredSettingsState
+
+        var body: some View {
+            AuthoredPullRequestsSettings(isEnabled: $state.configuration.showAuthoredPullRequests)
+        }
     }
 
     private func textFields(in view: NSView) -> [NSTextField] {

@@ -4,7 +4,7 @@
 
 A standalone native macOS menu-bar app for Azure DevOps pull requests that need your review.
 ReviewQ does not require SwiftBar, LeetBar, or AppFoundations at build time or runtime.
-Version 2.3 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
+Version 3 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
 future version, not included in this release.
 
 ## Features
@@ -19,6 +19,7 @@ future version, not included in this release.
   and comment-resolution labels based on your recorded review history.
 - Multiple Azure DevOps organizations and projects.
 - An opt-in, collapsible **People you follow** queue for PRs by configured authors.
+- An opt-in, collapsible **I'm the Author** section with active discussion counts, approval readiness, and browser-only links.
 - Persistent, account-scoped user/author identity caches with a manual re-lookup control.
 - Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
@@ -148,15 +149,42 @@ icon decoding/bundle lookup, following, cache expiry/account isolation, and nati
 Five host-dependent OCR checks were excluded as documented below. Both ZIPs passed signature,
 architecture, version/build, minimum-OS, checksum, and native macOS icon-resolution checks.
 
-## Download version 2.3
+## What's new in version 3
 
-Download from the [ReviewQ v2.3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.3.0).
+Version **3.0.0 / build 6** adds:
+
+- An opt-in, collapsible **I'm the Author** section below the review queues. Enable
+  **Show PRs I've authored** in Settings and choose **Save and Refresh** to list your active PRs
+  across accessible projects in configured organizations, newest first.
+- **`{X} Active Comments`** for nonzero unresolved discussion-thread counts, including pending
+  discussions, and **Merge Ready** for non-draft PRs with required approvals and no active comments.
+  Builds and other completion requirements are deliberately not checked.
+- Browser-only authored cards with `{author} in {repo-name}` labels. Authored PRs are deduplicated
+  from other queues and do not increase the pending-review count.
+- Fresh reviewer-policy evaluation with bounded enrichment and shared identity/project discovery.
+  Disabled installations make no authored-queue requests; existing saved preferences stay intact.
+- A fix for Azure DevOps returning URL-encoded policy artifact identifiers. Identifiers are decoded
+  once before correlation; malformed identifiers and policies for another PR are still rejected.
+
+The app remains read-only toward Azure DevOps. Copilot Terminal integration, automatic chat reuse,
+merge buttons, and comment-writing actions are not included. The
+[version 2.3 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v2.3.0) remains available.
+
+Release validation passed **199 Apple Silicon tests** and **199 Intel/Rosetta tests**, including
+authored-query pagination, discussion/approval readiness, encoded policy correlation, diagnostic
+privacy, section placement/collapse, settings, and browser-only interactions. The same five
+host-dependent OCR checks remain excluded. Both ZIP payloads passed signature, architecture,
+version/build, macOS minimum, icon-resource, build-identity, and checksum checks.
+
+## Download version 3
+
+Download from the [ReviewQ v3.0.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.0.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-2.3.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-2.3.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-3.0.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-3.0.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -170,7 +198,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 2.3 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 3 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -236,7 +264,7 @@ swift test --arch x86_64             # on an Intel Mac
 ```
 
 On Apple Silicon, Rosetta must already be available and the SwiftPM runner itself must run as
-Intel. On the v2.3 release-validation Mac, three accurate Vision OCR layout checks can stall or
+Intel. On this release-validation Mac, three accurate Vision OCR layout checks can stall or
 fail under Rosetta, and two existing small-caption OCR checks misrecognize native bitmap text.
 The tests remain unchanged; this host's release profile explicitly excludes those five OCR checks.
 Core validation, icon checks, following/caching, review-history states, launchers, hover rendering,
@@ -477,6 +505,38 @@ they, identity responses, and query URLs are not written to diagnostic logs.
 Turning the feature off removes the extra section on Save and Refresh and stops its requests.
 Your email list is retained locally so you can enable it again.
 
+## I'm the Author
+
+In Settings, enable **Show PRs I've authored**, then choose **Save and Refresh**. This is **off by
+default**, including for existing installations. A separate **I'm the Author** section appears below
+the other queues. It starts collapsed, retains its expansion through refreshes/reopening, and lists
+your active PRs newest first across accessible projects in configured organizations. The existing
+draft preference applies; completed and abandoned PRs are excluded.
+
+- **`{X} Active Comments`** appears only for a nonzero count. It counts active or pending unresolved
+  discussion threads, not individual replies, system events, or deleted discussions/comments.
+- **Merge Ready** appears only on non-draft PRs with no active comments, approved required reviewers,
+  and satisfied blocking minimum-reviewer/required-reviewer policies. Azure DevOps evaluates those
+  policies, including vote-reset and author-vote rules. Disabled, optional, and non-applicable policies
+  do not block this label. With no approval requirements, no approvals are needed.
+- **Build status is not checked.** Other completion requirements such as conflicts, work-item links,
+  and external status checks are not part of this label either; it is not a guarantee of mergeability.
+- Cards show the repository beside the author and have **only a browser button**. Clicking the card
+  also opens the PR. No merge, Edge, Scout, or Copilot actions are added to this section.
+
+Authored PRs are not duplicated in the other queues and do not increase the menu-bar or header's
+pending-review count. The section has its own count. It adds no requests while disabled. When enabled,
+it reuses your cached organization-specific user identity and per-refresh project discovery, queries
+authored PRs by creator, and reads discussions plus paginated reviewer-policy evaluations per PR.
+Enrichment retains the existing four-PR concurrency limit. PATs need **Code (Read)** and
+**Project and Team (Read)**; no additional write scopes are required.
+
+Counts and approval evaluations are refreshed, not cached across refreshes. Missing permissions,
+incomplete responses, unknown discussion/reviewer-policy statuses, and network failures are reported
+instead of producing a false Merge Ready label. As with other queues, a failed refresh preserves the
+last successful snapshot with an error indicator. Turning the setting off and saving removes the
+section and stops its extra requests.
+
 ## What counts as "needs review"?
 
 In the repository sections, a PR is included when it is active, directly lists the authenticated Azure DevOps user as a
@@ -514,7 +574,7 @@ Warnings/errors and startup version/build/OS/architecture information are record
 Verbose logging is opt-in and adds authentication, refresh, and HTTP request starts/outcomes,
 random session/refresh/request correlation IDs, HTTP status, monotonic duration, response byte
 counts, and page numbers. Refresh-start `count` means configured source lines; refresh-finish
-`count` means pending PRs; eviction `count`, when available, means discarded records.
+`count` means loaded PRs across all enabled queues; eviction `count`, when available, means discarded records.
 
 Both files are owner-readable/writable only, capped at **5 MiB each / 10 MiB total**, with
 **seven-day retention** maintained at startup, on writes, and before export. Malformed records

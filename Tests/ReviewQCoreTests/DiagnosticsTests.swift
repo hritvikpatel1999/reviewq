@@ -340,6 +340,33 @@ final class DiagnosticsTests: XCTestCase {
     }
 
     @MainActor
+    func testAuthoredReviewerPoliciesLogOnlySafeCategoriesAndNeverArtifactOrPolicyPayloads() async throws {
+        let logger = DiagnosticLogger(directory: directory, verboseEnabled: true)
+        let transport = StubTransport([
+            connectionResponse(), pullRequestsResponse([]), projectsResponse(["Project"]),
+            pullRequestsResponse([pullRequestJSON(author: reviewerID, hasReviewer: false)])
+        ], policies: [1: [policyEvaluationsResponse([
+            policyEvaluationJSON(status: "approved")
+                .replacingOccurrences(
+                    of: "\"status\":\"approved\"",
+                    with: "\"status\":\"approved\",\"privatePayload\":\"PRIVATE_APPROVAL_SENTINEL\""
+                )
+        ])]])
+        var settings = configuration()
+        settings.showAuthoredPullRequests = true
+        let result = try await AzureDevOpsReviewLoader(
+            authorization: StubAuthorization(), transport: transport, diagnostics: logger
+        ).load(configuration: settings)
+        XCTAssertTrue(try XCTUnwrap(result.pullRequests.first).isMergeReady)
+        logger.flush()
+        XCTAssertTrue(try records("verbose.log").contains { $0.operation == .reviewerPolicies && $0.event == .requestFinished })
+        let text = try logText()
+        for sentinel in ["PRIVATE_APPROVAL_SENTINEL", "artifactId", "CodeReviewId", "project-id", reviewerID, "Fixture author"] {
+            XCTAssertFalse(text.contains(sentinel), sentinel)
+        }
+    }
+
+    @MainActor
     func testTransportCodesAndCancellationSurviveNormalization() async throws {
         for (code, reason) in [
             (URLError.Code.timedOut, DiagnosticReason.timeout), (.notConnectedToInternet, .offline), (.cancelled, .cancelled)
