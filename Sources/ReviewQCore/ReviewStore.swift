@@ -6,6 +6,7 @@ import OSLog
 public final class ReviewStore: ObservableObject {
     @Published public private(set) var configuration: ReviewConfiguration
     @Published public private(set) var snapshot: ReviewSnapshot?
+    @Published public private(set) var changes = ReviewChanges()
     @Published public private(set) var isRefreshing = false
     @Published public private(set) var errorMessage: String?
 
@@ -14,6 +15,7 @@ public final class ReviewStore: ObservableObject {
     private let keychain: any PATStoring
     private let defaults: UserDefaults
     private let diagnostics: DiagnosticLogger
+    private let queueCache: ReviewQueueCache
     private let logger = Logger(subsystem: "dev.prbar.app", category: "reviews")
     private var pollingTask: Task<Void, Never>?
     private var manualTask: Task<Void, Never>?
@@ -29,6 +31,7 @@ public final class ReviewStore: ObservableObject {
         self.defaults = defaults
         self.keychain = keychain
         self.diagnostics = diagnostics
+        queueCache = ReviewQueueCache(defaults: defaults, diagnostics: diagnostics)
         self.loader = loader ?? AzureDevOpsReviewLoader(
             keychain: keychain, diagnostics: diagnostics, defaults: defaults
         )
@@ -115,7 +118,11 @@ public final class ReviewStore: ObservableObject {
         }
         do {
             let result = try await DiagnosticContext.$cycleID.withValue(cycleID) {
-                try await loader.load(configuration: currentConfiguration)
+                try await loader.load(configuration: currentConfiguration, onIdentityScope: { [weak self] scope in
+                    await self?.restoreCachedQueue(
+                        identityScope: scope, configuration: currentConfiguration, generation: currentGeneration
+                    )
+                })
             }
             guard !Task.isCancelled, generation == currentGeneration else {
                 diagnostics.log(
@@ -125,8 +132,10 @@ public final class ReviewStore: ObservableObject {
                 )
                 return
             }
+            changes = ReviewChanges(previous: snapshot, current: result)
             snapshot = result
             errorMessage = nil
+            if result.identityScope != nil { queueCache.save(result, configuration: currentConfiguration) }
             diagnostics.log(
                 .info, .refreshFinished, operation: .reviews, cycleID: cycleID,
                 durationMilliseconds: DiagnosticTiming.milliseconds(since: started),
@@ -153,9 +162,25 @@ public final class ReviewStore: ObservableObject {
         }
     }
 
-    public func save(_ configuration: ReviewConfiguration, newPAT: String = "") throws {
+    private func restoreCachedQueue(
+        identityScope: String, configuration: ReviewConfiguration, generation: UUID
+    ) {
+        guard !Task.isCancelled, self.generation == generation else { return }
+        if let snapshot, snapshot.identityScope != identityScope {
+            self.snapshot = nil
+            changes = ReviewChanges()
+            queueCache.clear()
+        }
+        if snapshot == nil {
+            snapshot = queueCache.load(configuration: configuration, identityScope: identityScope)
+        }
+    }
+
+    public func save(
+        _ configuration: ReviewConfiguration, newPAT: String = "", verifiedSnapshot: ReviewSnapshot? = nil
+    ) throws {
         do {
-            try saveSettings(configuration, newPAT: newPAT)
+            try saveSettings(configuration, newPAT: newPAT, verifiedSnapshot: verifiedSnapshot)
             diagnostics.log(.info, .settingsSaved, operation: .settings)
         } catch {
             diagnostics.logFailure(.settingsFailed, error: error, operation: .settings)
@@ -163,7 +188,9 @@ public final class ReviewStore: ObservableObject {
         }
     }
 
-    private func saveSettings(_ configuration: ReviewConfiguration, newPAT: String) throws {
+    private func saveSettings(
+        _ configuration: ReviewConfiguration, newPAT: String, verifiedSnapshot: ReviewSnapshot?
+    ) throws {
         _ = try configuration.validatedSources()
         let data = try JSONEncoder().encode(configuration)
         if configuration.authentication == .personalAccessToken {
@@ -177,9 +204,19 @@ public final class ReviewStore: ObservableObject {
         defaults.set(data, forKey: Self.settingsKey)
         cancelTasks()
         self.configuration = configuration
-        snapshot = nil
+        queueCache.clear()
+        snapshot = verifiedSnapshot
+        if let verifiedSnapshot, verifiedSnapshot.identityScope != nil {
+            queueCache.save(verifiedSnapshot, configuration: configuration)
+        }
+        changes = ReviewChanges()
         errorMessage = nil
-        if isStarted { startPolling() }
+        if isStarted {
+            let needsRefresh = verifiedSnapshot.map {
+                Date().timeIntervalSince($0.updatedAt) >= TimeInterval(configuration.refreshInterval.rawValue)
+            } ?? true
+            startPolling(refreshImmediately: needsRefresh)
+        }
     }
 
     public func deleteSavedPAT() throws {
@@ -197,6 +234,8 @@ public final class ReviewStore: ObservableObject {
         if configuration.authentication == .personalAccessToken {
             cancelTasks()
             snapshot = nil
+            changes = ReviewChanges()
+            queueCache.clear()
             errorMessage = ReviewQError.missingPAT.localizedDescription
             if isStarted { startPolling() }
         }
@@ -211,10 +250,10 @@ public final class ReviewStore: ObservableObject {
         isRefreshing = false
     }
 
-    private func startPolling() {
+    private func startPolling(refreshImmediately: Bool = true) {
         pollingTask = Task { [weak self] in
             guard let self else { return }
-            await refresh()
+            if refreshImmediately { await refresh() }
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(configuration.refreshInterval.rawValue))

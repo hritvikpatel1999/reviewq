@@ -1,6 +1,6 @@
 import Foundation
 
-public struct AuthoredPullRequestStatus: Equatable, Sendable {
+public struct AuthoredPullRequestStatus: Codable, Equatable, Sendable {
     public let activeCommentCount: Int
     public let hasRequiredApprovals: Bool
 

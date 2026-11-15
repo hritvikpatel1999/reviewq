@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ReviewStage: String, CaseIterable, Sendable {
+public enum ReviewStage: String, Codable, CaseIterable, Sendable {
     case firstReview
     case approved, approvedWithSuggestions, waitedForAuthor, rejected, commented
     case commentsResolved
@@ -102,14 +102,14 @@ public enum ReviewStage: String, CaseIterable, Sendable {
     }
 }
 
-public struct ReviewCommentResolution: Equatable, Sendable {
+public struct ReviewCommentResolution: Codable, Equatable, Sendable {
     public let resolvedCount: Int
     public let openCount: Int
 
     public var summary: String { "\(resolvedCount) resolved, \(openCount) open" }
 }
 
-public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
+public struct ReviewPullRequest: Codable, Equatable, Sendable, Identifiable {
     public let number: Int
     public let title: String
     public let author: String
@@ -125,6 +125,7 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
     public let commentResolution: ReviewCommentResolution?
     public let isFollowedOnly: Bool
     public let authoredStatus: AuthoredPullRequestStatus?
+    var changeFingerprint: Data?
 
     public init(
         number: Int, title: String, author: String, organization: String, project: String,
@@ -197,9 +198,10 @@ public struct ReviewPullRequest: Equatable, Sendable, Identifiable {
     }
 }
 
-public struct ReviewSnapshot: Equatable, Sendable {
+public struct ReviewSnapshot: Codable, Equatable, Sendable {
     public let pullRequests: [ReviewPullRequest]
     public let updatedAt: Date
+    var identityScope: String?
 
     public init(pullRequests: [ReviewPullRequest], updatedAt: Date = Date()) {
         self.pullRequests = pullRequests
@@ -213,7 +215,20 @@ public struct ReviewSnapshot: Equatable, Sendable {
 
 public protocol ReviewLoading: Sendable {
     func load(configuration: ReviewConfiguration) async throws -> ReviewSnapshot
+    func load(
+        configuration: ReviewConfiguration,
+        onIdentityScope: @Sendable (String) async -> Void
+    ) async throws -> ReviewSnapshot
     func invalidateIdentityCache() async
+}
+
+public extension ReviewLoading {
+    func load(
+        configuration: ReviewConfiguration,
+        onIdentityScope: @Sendable (String) async -> Void
+    ) async throws -> ReviewSnapshot {
+        try await load(configuration: configuration)
+    }
 }
 
 struct APIList<Item: Decodable & Sendable>: Decodable, Sendable {
@@ -284,6 +299,13 @@ struct APIPullRequest: Decodable, Sendable {
     let repository: APIRepository
     let reviewers: [APIReviewer]
     let isDraft: Bool?
+    let sourceRefName: String?
+    let targetRefName: String?
+    let lastMergeSourceCommit: Commit?
+
+    struct Commit: Decodable, Sendable {
+        let commitId: String
+    }
 
     func reviewID(source: ReviewSource) -> String {
         ReviewPullRequest.identifier(
@@ -305,13 +327,13 @@ struct APIPullRequest: Decodable, Sendable {
     func review(
         source: ReviewSource, reviewer: APIReviewer?, stage: ReviewStage,
         commentResolution: ReviewCommentResolution? = nil, isFollowedOnly: Bool = false,
-        authoredStatus: AuthoredPullRequestStatus? = nil
+        authoredStatus: AuthoredPullRequestStatus? = nil, fingerprint: Data? = nil
     ) throws -> ReviewPullRequest {
         let url = try AzureDevOpsURL.make(
             organization: source.organization,
             path: [repository.project.name, "_git", repository.id, "pullrequest", String(pullRequestId)]
         )
-        return ReviewPullRequest(
+        var result = ReviewPullRequest(
             number: pullRequestId, title: title, author: createdBy.displayName,
             organization: source.organization, project: repository.project.name,
             repository: repository.name, repositoryID: repository.id,
@@ -320,6 +342,8 @@ struct APIPullRequest: Decodable, Sendable {
             reviewStage: stage, commentResolution: commentResolution, isFollowedOnly: isFollowedOnly,
             authoredStatus: authoredStatus
         )
+        result.changeFingerprint = fingerprint
+        return result
     }
 }
 
@@ -331,9 +355,10 @@ struct APIReviewThread: Decodable, Sendable {
     let voterID: UUID?
     let status: APIReviewThreadStatus
     let isDeleted: Bool
+    let fingerprint: Data
 
     private enum CodingKeys: String, CodingKey {
-        case id, publishedDate, comments, properties, identities, status, isDeleted
+        case id, publishedDate, lastUpdatedDate, comments, properties, identities, status, isDeleted
     }
 
     init(from decoder: any Decoder) throws {
@@ -357,6 +382,13 @@ struct APIReviewThread: Decodable, Sendable {
         } else {
             voterID = nil
         }
+        let updated = try container.decodeIfPresent(Date.self, forKey: .lastUpdatedDate)
+        fingerprint = try ReviewFingerprint.make([
+            "thread", id.map { String($0) } ?? "", status.rawValue, String(isDeleted),
+            publishedDate.map { String($0.timeIntervalSince1970) } ?? "",
+            updated.map { String($0.timeIntervalSince1970) } ?? "",
+            voterID?.uuidString ?? "", properties?.vote.map { String($0) } ?? ""
+        ], children: comments.map(\.fingerprint))
     }
 
     func hasReviewComment(from reviewerID: UUID, includingDeleted: Bool = true) -> Bool {
@@ -396,9 +428,10 @@ struct APIReviewComment: Decodable, Sendable {
     let commentType: String?
     let isDeleted: Bool
     let hasContent: Bool
+    let fingerprint: Data
 
     private enum CodingKeys: String, CodingKey {
-        case author, commentType, isDeleted, content
+        case id, parentCommentId, author, commentType, isDeleted, content, publishedDate, lastUpdatedDate
     }
 
     init(from decoder: any Decoder) throws {
@@ -408,6 +441,16 @@ struct APIReviewComment: Decodable, Sendable {
         isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
         let content = try container.decodeIfPresent(String.self, forKey: .content)
         hasContent = content?.contains { !$0.isWhitespace } == true
+        let id = try container.decodeIfPresent(Int.self, forKey: .id)
+        let parent = try container.decodeIfPresent(Int.self, forKey: .parentCommentId)
+        let published = try container.decodeIfPresent(Date.self, forKey: .publishedDate)
+        let updated = try container.decodeIfPresent(Date.self, forKey: .lastUpdatedDate)
+        fingerprint = try ReviewFingerprint.make([
+            "comment", id.map { String($0) } ?? "", parent.map { String($0) } ?? "",
+            author.id.uuidString, commentType?.lowercased() ?? "unknown", String(isDeleted),
+            published.map { String($0.timeIntervalSince1970) } ?? "",
+            updated.map { String($0.timeIntervalSince1970) } ?? "", content ?? ""
+        ])
     }
 
     func isReviewComment(inSystemThread: Bool) -> Bool {

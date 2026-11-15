@@ -199,7 +199,7 @@ final class RepositoryDropdownTests: XCTestCase {
         var assistants: [ReviewAssistant] = []
         let (host, window) = makeHost(PullRequestRow(
             request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
-            review: { assistants.append($0) }, isLaunchingReview: true
+            review: { assistants.append($0) }, isLaunchingReview: true, isChanged: true
         ).frame(width: 392))
         defer { window.close() }
         try await settle(host)
@@ -220,6 +220,7 @@ final class RepositoryDropdownTests: XCTestCase {
         try await settle(host)
         XCTAssertTrue(assistants.isEmpty)
         XCTAssertEqual(edgeOpened, 0)
+        XCTAssertTrue(try hasGreenDot(in: host), "Browser actions must not clear the refresh-change dot.")
     }
 
     private func exercisePRCardActions(isFollowedOnly: Bool) async throws {
@@ -231,7 +232,7 @@ final class RepositoryDropdownTests: XCTestCase {
         let host = NSHostingView(rootView: PullRequestRow(
             request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
             review: { assistants.append($0) },
-            isLaunchingReview: false
+            isLaunchingReview: false, isChanged: true
         ).frame(width: 392))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 392, height: 120),
@@ -262,11 +263,12 @@ final class RepositoryDropdownTests: XCTestCase {
         try click(NSPoint(x: 100, y: top + direction * 48), in: host, window: window)
         try await settle(host)
         XCTAssertEqual(opened, 1, "Clicking the row should still open the default browser.")
+        XCTAssertTrue(try hasGreenDot(in: host), "Opening a PR in any assistant or browser must leave its dot intact.")
 
         host.rootView = PullRequestRow(
             request: request, open: { opened += 1 }, openInEdge: { edgeOpened += 1 },
             review: { assistants.append($0) },
-            isLaunchingReview: true
+            isLaunchingReview: true, isChanged: true
         ).frame(width: 392)
         try await settle(host)
         try click(NSPoint(x: 371, y: y), in: host, window: window)
@@ -275,6 +277,27 @@ final class RepositoryDropdownTests: XCTestCase {
         XCTAssertEqual(assistants, [.copilot, .scout], "AI buttons must be disabled during a launch.")
         XCTAssertEqual(opened, 1, "Disabled AI buttons must not fall through to the underlying row button.")
         XCTAssertEqual(edgeOpened, 1)
+    }
+
+    private func hasGreenDot(in host: NSView) throws -> Bool {
+        let height = host.intrinsicContentSize.height
+        let top = host.isFlipped ? host.bounds.midY - height / 2 : host.bounds.midY + height / 2
+        let rect = NSRect(
+            x: host.bounds.midX - 196 + 10, y: host.isFlipped ? top + 15 : top - 27, width: 10, height: 12
+        )
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: rect))
+        host.cacheDisplay(in: rect, to: bitmap)
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                if color.greenComponent > 0.3,
+                   color.greenComponent > color.redComponent * 1.4,
+                   color.greenComponent > color.blueComponent * 1.2 {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func request(

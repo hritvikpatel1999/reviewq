@@ -80,18 +80,27 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
     }
 
     public func load(configuration: ReviewConfiguration) async throws -> ReviewSnapshot {
+        try await load(configuration: configuration, onIdentityScope: { _ in })
+    }
+
+    public func load(
+        configuration: ReviewConfiguration,
+        onIdentityScope: @Sendable (String) async -> Void
+    ) async throws -> ReviewSnapshot {
         let sources = try configuration.validatedSources()
         let followedEmails = try configuration.validatedFollowedAuthors()
         do {
             return try await authenticatedFetch(
-                sources: sources, followedEmails: followedEmails, configuration: configuration
+                sources: sources, followedEmails: followedEmails, configuration: configuration,
+                onIdentityScope: onIdentityScope
             )
         } catch let error as ReviewQError {
             if configuration.authentication == .azureCLI, case .http(401, _) = error {
                 try Task.checkCancellation()
                 await authorization.invalidate()
                 return try await authenticatedFetch(
-                    sources: sources, followedEmails: followedEmails, configuration: configuration
+                    sources: sources, followedEmails: followedEmails, configuration: configuration,
+                    onIdentityScope: onIdentityScope
                 )
             }
             throw error
@@ -99,24 +108,28 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
     }
 
     private func authenticatedFetch(
-        sources: [ReviewSource], followedEmails: [String], configuration: ReviewConfiguration
+        sources: [ReviewSource], followedEmails: [String], configuration: ReviewConfiguration,
+        onIdentityScope: @Sendable (String) async -> Void
     ) async throws -> ReviewSnapshot {
         let generation = identityCache.requestGeneration()
         let header = try await authorization.authorization(for: configuration)
         return try await fetch(
             sources: sources, followedEmails: followedEmails, configuration: configuration,
-            header: header, cacheGeneration: generation
+            header: header, cacheGeneration: generation, onIdentityScope: onIdentityScope
         )
     }
 
     private func fetch(
         sources: [ReviewSource], followedEmails: [String], configuration: ReviewConfiguration,
-        header: String, cacheGeneration: UUID
+        header: String, cacheGeneration: UUID, onIdentityScope: @Sendable (String) async -> Void
     ) async throws -> ReviewSnapshot {
         try Task.checkCancellation()
-        let cacheContext = try identityCache.begin(scope: IdentityCache.scope(
+        let identityScope = try IdentityCache.scope(
             configuration: configuration, header: header, sources: sources, followedEmails: followedEmails
-        ), requestGeneration: cacheGeneration)
+        )
+        let cacheContext = try identityCache.begin(scope: identityScope, requestGeneration: cacheGeneration)
+        await onIdentityScope(identityScope)
+        try Task.checkCancellation()
         var identities: [String: UUID] = [:]
         var organizationProjects: [String: [String]] = [:]
         var pullRequests: [String: ReviewPullRequest] = [:]
@@ -225,7 +238,9 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
             guard unresolved.isEmpty else { throw ReviewQError.unresolvedFollowedAuthors(unresolved) }
         }
         let sorted = pullRequests.values.sorted(by: ReviewPullRequest.newestFirst)
-        return ReviewSnapshot(pullRequests: sorted)
+        var snapshot = ReviewSnapshot(pullRequests: sorted)
+        snapshot.identityScope = identityScope
+        return snapshot
     }
 
     private func followedAuthors(
@@ -421,19 +436,21 @@ public struct AzureDevOpsReviewLoader: ReviewLoading {
         if let continuation = response.continuationToken, !continuation.isEmpty {
             throw ReviewQError.invalidPagination(scope)
         }
+        let fingerprint = try ReviewFingerprint.pullRequest(request, threads: threads.value)
         if isAuthored {
             let evaluations = try await approvalPolicies(for: request, source: source, header: header)
             let status = try AuthoredPullRequestStatus.from(
                 threads: threads.value, reviewers: request.reviewers, evaluations: evaluations
             )
             return try request.review(
-                source: source, reviewer: nil, stage: .firstReview, authoredStatus: status
+                source: source, reviewer: nil, stage: .firstReview, authoredStatus: status, fingerprint: fingerprint
             )
         }
         let history = try ReviewStage.fromHistory(threads.value, reviewerID: reviewerID)
         return try request.review(
             source: source, reviewer: candidate.reviewer,
-            stage: history.stage, commentResolution: history.commentResolution, isFollowedOnly: isFollowedOnly
+            stage: history.stage, commentResolution: history.commentResolution, isFollowedOnly: isFollowedOnly,
+            fingerprint: fingerprint
         )
     }
 

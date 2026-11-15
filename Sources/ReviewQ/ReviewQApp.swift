@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import OSLog
 import ReviewQCore
@@ -53,26 +54,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     let loginItem: LoginItemStore
     let diagnostics: DiagnosticsStore
     let menuShortcut: GlobalShortcutStore
+    let onboarding: OnboardingStore
     @Published var actionError: String?
     @Published private(set) var isLaunchingReview = false
     private let reviewLauncher: any ReviewLaunching
     private let presentReviewError: @MainActor (ReviewLaunchError) -> Void
     private let popover = NSPopover()
+    private let menuBarChangeDot = MenuBarChangeDot(frame: .zero)
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
     private var subscriptions: Set<AnyCancellable> = []
     private let logger = Logger(subsystem: "dev.prbar.app", category: "application")
 
     init(
         store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
         reviewLauncher: any ReviewLaunching = ReviewLauncher(),
-        shortcutRegistrar: (any GlobalShortcutRegistering)? = nil,
+        shortcutRegistrar: (any GlobalShortcutRegistering)? = nil, onboarding: OnboardingStore? = nil,
         presentReviewError: @escaping @MainActor (ReviewLaunchError) -> Void = AppDelegate.showReviewError
     ) {
         self.store = store
         self.diagnostics = diagnostics
         self.reviewLauncher = reviewLauncher
+        self.onboarding = onboarding ?? OnboardingStore(store: store, diagnostics: diagnostics.logger)
         self.presentReviewError = presentReviewError
         menuShortcut = GlobalShortcutStore(
             registrar: shortcutRegistrar ?? CarbonShortcutRegistrar(diagnostics: diagnostics.logger),
@@ -92,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         image.isTemplate = true
         button.image = image
         button.imagePosition = .imageLeading
+        menuBarChangeDot.frame = button.bounds
+        menuBarChangeDot.autoresizingMask = [.width, .height]
+        menuBarChangeDot.isHidden = true
+        menuBarChangeDot.setAccessibilityElement(false)
+        button.addSubview(menuBarChangeDot)
         button.target = self
         button.action = #selector(togglePopover)
         popover.behavior = .transient
@@ -123,18 +133,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         store.start()
         if CommandLine.arguments.contains("--diagnostics") {
             showDiagnostics()
+        } else if CommandLine.arguments.contains("--setup") || onboarding.shouldPresentAutomatically {
+            showOnboarding()
         } else if !store.configuration.hasSources || store.errorMessage != nil || menuShortcut.errorMessage != nil {
+            showSettings()
+        } else if let error = onboarding.errorMessage {
+            actionError = error
             showSettings()
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         diagnostics.logger.log(.info, .appReopened)
-        showSettings()
+        if onboarding.shouldPresentAutomatically {
+            showOnboarding()
+        } else {
+            showSettings()
+        }
         return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        onboarding.pause()
         menuShortcut.stop()
         store.stop()
         diagnostics.recordShutdown()
@@ -150,15 +170,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         if popover.isShown {
             closePopover()
         } else {
-            guard let button = statusItem?.button else {
-                reportActionFailure("ReviewQ's menu-bar button is unavailable. Restart the app.")
-                return
-            }
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            popover.contentViewController?.view.window?.makeKey()
-            button.highlight(true)
+            showQueue()
         }
+    }
+
+    func showQueue() {
+        guard let button = statusItem?.button else {
+            reportActionFailure("ReviewQ's menu-bar button is unavailable. Restart the app.")
+            return
+        }
+        if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        popover.contentViewController?.view.window?.makeKey()
+        button.highlight(true)
     }
 
     func closePopover() { popover.performClose(nil) }
@@ -168,6 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func showSettings() {
+        if onboardingWindow != nil || onboarding.isActive {
+            showOnboarding()
+            return
+        }
         closePopover()
         loginItem.refresh()
         if settingsWindow == nil {
@@ -188,6 +216,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @discardableResult
+    func showOnboarding() -> String? {
+        guard settingsWindow == nil else {
+            let message = "Close Settings before running setup. Your unsaved Settings edits have not been changed."
+            reportActionFailure(message, reason: .invalidConfiguration)
+            return message
+        }
+        closePopover()
+        if onboardingWindow == nil {
+            onboarding.begin()
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered, defer: false
+            )
+            window.title = "ReviewQ Setup"
+            window.titlebarAppearsTransparent = true
+            window.contentMinSize = NSSize(width: 720, height: 640)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = NSHostingController(rootView: OnboardingView(model: onboarding, app: self))
+            window.delegate = self
+            window.center()
+            onboardingWindow = window
+        }
+        actionError = nil
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
+        return nil
+    }
+
+    func finishOnboarding() {
+        onboardingWindow?.close()
+        showQueue()
+    }
+
+    func requestScoutAccessibility() {
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        if !AXIsProcessTrustedWithOptions(options) {
+            guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+                  NSWorkspace.shared.open(url) else {
+                let message = "Open System Settings > Privacy & Security > Accessibility and allow ReviewQ."
+                reportActionFailure(message, operation: .scout, reason: .approvalPending)
+                onboarding.reportActionError(message)
+                return
+            }
+        }
+        onboarding.refreshCompanions()
     }
 
     func showDiagnostics() {
@@ -215,6 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             settingsWindow = nil
         } else if let window = notification.object as? NSWindow, window === diagnosticsWindow {
             diagnosticsWindow = nil
+        } else if let window = notification.object as? NSWindow, window === onboardingWindow {
+            onboarding.pause()
+            onboardingWindow = nil
         }
     }
 
@@ -358,7 +438,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     private func updateStatusItem() {
         statusItem?.button?.title = store.menuBarTitle
-        let description: String
+        menuBarChangeDot.isHidden = !store.changes.hasChanges
+        menuBarChangeDot.needsDisplay = true
+        var description: String
         if let error = store.errorMessage {
             description = "ReviewQ - refresh error: \(error)"
         } else if let snapshot = store.snapshot {
@@ -366,7 +448,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         } else {
             description = store.configuration.hasSources ? "ReviewQ - loading reviews" : "ReviewQ - connect Azure DevOps"
         }
+        if store.changes.hasChanges {
+            description += ". Changes since the previous successful refresh"
+        }
         statusItem?.button?.toolTip = description
         statusItem?.button?.setAccessibilityLabel(description)
+    }
+}
+
+final class MenuBarChangeDot: NSView {
+    override var isFlipped: Bool { superview?.isFlipped ?? false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let button = superview as? NSButton, let cell = button.cell else {
+            preconditionFailure("The menu-bar change indicator must overlay a button.")
+        }
+        let image = cell.imageRect(forBounds: button.bounds)
+        let y = isFlipped ? image.minY - 1 : image.maxY - 4
+        NSColor.systemGreen.setFill()
+        NSBezierPath(ovalIn: NSRect(x: image.maxX - 3, y: y, width: 5, height: 5)).fill()
     }
 }
