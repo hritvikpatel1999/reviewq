@@ -18,6 +18,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case refreshStarted, refreshFinished, refreshFailed, refreshCancelled
     case requestStarted, requestFinished, requestFailed, requestCancelled
     case identityCacheHit, identityCacheMiss, identityCacheCleared, identityCacheInvalidated
+    case queueCacheRestored, queueCacheCleared, queueCacheInvalidated, queueCacheWriteFailed
     case settingsSaved, settingsFailed, patDeleted, patDeleteFailed
     case loginItemChanged, loginItemFailed, browserOpenFailed, applicationActionFailed, diagnosticsOpened
     case reviewLaunchStarted, reviewLaunchFinished, reviewLaunchFailed
@@ -25,7 +26,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
-    case identity, followedIdentity, identityCache, projects, pullRequests, reviewHistory, reviewerPolicies, reviews
+    case identity, followedIdentity, identityCache, queueCache, projects, pullRequests, reviewHistory, reviewerPolicies, reviews
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
     case scout, copilot
     case shortcut

@@ -10,6 +10,7 @@ future version, not included in this release.
 ## Features
 
 - Native pull-request icon with the pending-review count.
+- Green dots on the menu-bar icon, affected sections, and PRs changed since the previous successful refresh.
 - A bundled application icon for Finder, Spotlight, and app launchers.
 - Newest-first repository dropdowns with pending counts, author, age, review-stage labels, and one-click browser links.
 - Per-PR Edge, Scout, and Copilot actions with hover feedback.
@@ -22,12 +23,52 @@ future version, not included in this release.
 - An opt-in, collapsible **I'm the Author** section with active discussion counts, approval readiness, and browser-only links.
 - Persistent, account-scoped user/author identity caches with a manual re-lookup control.
 - Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
+- Restore the last successful queue while a startup refresh loads fresh data for the same account.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
 - Optional personal access token stored only in macOS Keychain.
 - Settings, optional draft PRs, and launch at login.
+- A resumable six-screen first-run setup with connection testing and optional assistant setup.
 - Native Select All, Copy, Paste, Cut, Undo, and Redo shortcuts in Settings.
 - Visible authentication/network errors; failed refreshes never masquerade as an empty queue.
 - Local diagnostics with opt-in verbose logging, correlated request outcomes, and private ZIP exports.
+
+## First-run setup
+
+New installations open **ReviewQ Setup**: Welcome, review sources, Azure DevOps connection,
+optional review companions, preferences, and a ready screen. The native window follows macOS
+light/dark appearance and the same accent as Settings, with progress markers, status cards, and
+fixed Back/Continue controls.
+Existing configured installations continue straight to the menu bar without being re-onboarded.
+
+- Enter one organization or project URL per line. Use a project URL for focused, faster discovery.
+- Choose Azure CLI or a read-only PAT and select **Test connection**. Sign-in is performed by you
+  in Terminal; setup does not install software or run `az login` automatically.
+- Connection testing uses the existing read-only loader against your draft sources. A failed
+  check cannot appear as an empty successful queue or unlock completion.
+- Scout, VS Code, and Edge are optional. **Detected** means the app is installed, not that its
+  account is signed in. Only Scout automation needs Accessibility permission, requested by an
+  explicit button. ReviewQ does not need microphone or Screen Recording permission.
+- VS Code keeps its profile's permission defaults. The optional Autopilot guide does not enable
+  Allow All or change VS Code settings or organization policies.
+- Refresh defaults to 15 minutes; following people, authored PRs, drafts, and launch at login
+  remain opt-in. Extra queue choices are checked before reaching the ready screen.
+- **Open my queue** saves settings, stores a new PAT in Keychain, and opens the verified queue.
+  A fresh snapshot is reused rather than immediately repeating its network refresh; a result older
+  than the selected refresh interval triggers a normal refresh. Normal polling, manual refresh,
+  and green change indicators continue to work as before.
+
+Closing setup pauses it. Draft preferences and the current step are stored locally under
+`reviewOnboardingProgress`; PATs and fetched queues are **never** stored in that draft.
+Reopening after a connection check returns to authentication to verify access again. An unsaved
+PAT must be entered again. Completed setup is recorded under `reviewOnboardingCompleted`.
+Launch-at-login changes are applied immediately, as in Settings, and remain independently
+configurable through macOS.
+
+To revisit setup, close Settings and click **Run Setup** at the bottom-right of the menu-bar queue,
+beside its update time. The button is also available before a queue has loaded. Setup refuses to
+discard an open Settings editor. A replay starts from the latest saved preferences; **Keep existing
+settings** abandons the replay without replacing them. Advanced assistant prompts, caches, and
+logs remain in Settings/Diagnostics. Developers can also start the app with `--setup`.
 
 ## What's new in version 2
 
@@ -176,15 +217,39 @@ privacy, section placement/collapse, settings, and browser-only interactions. Th
 host-dependent OCR checks remain excluded. Both ZIP payloads passed signature, architecture,
 version/build, macOS minimum, icon-resource, build-identity, and checksum checks.
 
-## Download version 3
+## What's new in version 3.1
 
-Download from the [ReviewQ v3.0.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.0.0).
+Version **3.1.0 / build 7** adds:
+
+- A resumable six-screen first-run experience with connection testing, optional companions,
+  native blue accents, and a **Run Setup** button beside the queue's update time.
+- Green change indicators on the menu-bar icon, affected repository/section headers, and changed PRs.
+  Opening a PR does not clear its dot; the next successful refresh replaces the change indicators.
+- A bounded local cache of the last successful queue. Once the existing authentication step matches
+  the account and queue settings, the cached repositories and update time appear while fresh PRs
+  load. The header's refresh spinner stays visible; failures keep the last successful data and show
+  an explicit error. No extra authentication or Azure DevOps requests are added.
+
+Release validation passed **233 tests on Apple Silicon and 233 on Intel/Rosetta**, with the same five
+host-dependent OCR checks excluded. All new cache, setup, and change-indicator tests were included,
+as were the native Settings editing tests. Cache coverage includes relaunch while loading, account
+and preference isolation, successful empty queues, failure/cancellation preservation, size and age
+limits, and the cached dashboard's update time and refresh indicator.
+Both ZIP payloads passed strict signature, architecture, version/build, macOS minimum,
+icon-resource, compiled-binary UUID, and checksum checks.
+
+The [version 3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.0.0) remains available.
+Read the [cached startup details](#cached-startup-queue) before relying on an older displayed status.
+
+## Download version 3.1
+
+Download from the [ReviewQ v3.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-3.0.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-3.0.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-3.1.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-3.1.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -198,7 +263,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 3 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 3.1 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -237,7 +302,8 @@ open dist/ReviewQ.app
 ```
 
 The app has no Dock icon. Click its pull-request icon in the menu bar. First launch opens
-Settings; reopening an already-running app also brings Settings forward.
+setup; configured installations skip it. Reopening an already-running app brings Settings
+forward, or resumes unfinished setup.
 
 The default build uses the host architecture and outputs `dist/ReviewQ.app`. Quit the app before
 rebuilding that output. You can copy it to Applications before enabling launch at login.
@@ -531,11 +597,37 @@ authored PRs by creator, and reads discussions plus paginated reviewer-policy ev
 Enrichment retains the existing four-PR concurrency limit. PATs need **Code (Read)** and
 **Project and Team (Read)**; no additional write scopes are required.
 
-Counts and approval evaluations are refreshed, not cached across refreshes. Missing permissions,
+Counts and approval evaluations are recalculated on every successful refresh; the previous display
+can be restored at startup as described below. Missing permissions,
 incomplete responses, unknown discussion/reviewer-policy statuses, and network failures are reported
 instead of producing a false Merge Ready label. As with other queues, a failed refresh preserves the
 last successful snapshot with an error indicator. Turning the setting off and saving removes the
 section and stops its extra requests.
+
+## Changes since the previous refresh
+
+Green dots identify differences between the latest two successful network refreshes, not unread
+PRs. The menu-bar dot means at least one enabled queue changed; repository, **People you follow**,
+and **I'm the Author** headers identify the affected sections, and PR cards identify new or updated
+requests. Opening a PR or expanding a section does not clear a dot. Each successful refresh replaces
+the indicators: an unchanged PR loses its dot on the next successful refresh, even if never opened.
+
+The first successful load without a matching cache establishes a baseline without dots. Failed or
+cancelled refreshes leave the last successful queue and dots intact. A restored queue and its compact
+fingerprints provide the baseline for the next startup refresh; old dots themselves are not persisted.
+Saving Settings or changing the authenticated account establishes a new baseline.
+
+Detection uses the same PR, discussion, and authored reviewer-policy responses already fetched:
+title/draft/review state, reviewer votes, source-commit markers when supplied by Azure DevOps, human
+and system discussion updates (including replies, edits, deletions, and resolution), and authored
+approval readiness. Refresh timestamps, relative age text, and response ordering do not create dots.
+PRs leaving a queue mark its header and the menu bar, but no removed card or empty repository is
+invented. Differences are observed at refresh time, not a complete log of events between refreshes.
+
+There are **no additional HTTP calls, authentication requests, permissions, or polling timers**.
+Build results, complete descriptions, and the precise reason a PR left a queue are not fetched for
+this feature. A dot means changed, not necessarily actionable or approved; hover/accessibility text
+explains its meaning.
 
 ## What counts as "needs review"?
 
@@ -552,8 +644,35 @@ are counted once. Team/group-only reviewer assignments are not expanded in this 
 All configured sources must refresh successfully before the queue is replaced. If any source
 fails, the last successful queue remains visible with an error banner, its original update time,
 and a `!` in the menu bar. Before the first successful refresh, no zero count is shown.
-PR contents and review history are kept in memory, not persisted to disk. Only the identity metadata
-described above is cached in local preferences.
+Raw PR discussions and review-history responses are kept in memory, not persisted to disk.
+The display-only startup cache below and the identity metadata described above are stored locally.
+
+## Cached startup queue
+
+After a successful refresh, ReviewQ stores one display snapshot under `reviewQueueCache` in local
+preferences. It contains PR titles, author display names, repository/project names, browser links,
+display flags and badges, the successful update time, compact change fingerprints, and hashed
+account/settings scopes. It is **not encrypted**. PATs, access tokens, assistant prompts, descriptions,
+and comment bodies are not included. The cache is not included in diagnostic log exports.
+
+On relaunch, the normal credential acquisition runs first. Only a cache matching its account scope
+and current queue settings is shown, before Azure DevOps PR requests begin. The original **Updated
+... ago** time and the header's refreshing indicator distinguish the saved display from a fresh result.
+A changed account, tenant, source, draft preference, or optional queue selection cannot reuse another
+queue. An authentication failure before a matching scope is available does not expose cached data.
+
+Successful empty queues are cached too. Failed, cancelled, and superseded refreshes do not replace
+the cache. Only accepted, complete results are saved; setup saves its verified result on completion.
+Saving Settings or deleting the active PAT clears the previous cache. Read-only display changes
+such as the count, refresh interval, and assistant instructions do not affect the account/queue
+fingerprint, although explicitly saving Settings still clears the old baseline.
+
+Restoration is limited to snapshots less than **seven days** old, **2 MiB** encoded, and **4,096 PRs**.
+Expired, future-dated, malformed, duplicate, or mismatched caches are discarded. Oversized queues
+remain usable in memory but are not partially cached; a diagnostic warning explains why they will
+need a fresh load next time. Warnings never include cached titles, URLs, or credentials.
+Retention is checked when restoring, not by a background cleanup timer while the app is closed.
+The first launch after upgrading must complete one successful refresh before a startup cache exists.
 
 ## Diagnostics
 

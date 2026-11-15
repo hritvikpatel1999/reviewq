@@ -345,7 +345,9 @@ final class DiagnosticsTests: XCTestCase {
         let transport = StubTransport([
             connectionResponse(), pullRequestsResponse([]), projectsResponse(["Project"]),
             pullRequestsResponse([pullRequestJSON(author: reviewerID, hasReviewer: false)])
-        ], policies: [1: [policyEvaluationsResponse([
+        ], histories: [1: reviewThreadsResponse([
+            reviewCommentThreadJSON(content: "PRIVATE_CHANGE_FINGERPRINT_COMMENT", statusJSON: #""fixed""#)
+        ])], policies: [1: [policyEvaluationsResponse([
             policyEvaluationJSON(status: "approved")
                 .replacingOccurrences(
                     of: "\"status\":\"approved\"",
@@ -361,7 +363,10 @@ final class DiagnosticsTests: XCTestCase {
         logger.flush()
         XCTAssertTrue(try records("verbose.log").contains { $0.operation == .reviewerPolicies && $0.event == .requestFinished })
         let text = try logText()
-        for sentinel in ["PRIVATE_APPROVAL_SENTINEL", "artifactId", "CodeReviewId", "project-id", reviewerID, "Fixture author"] {
+        for sentinel in [
+            "PRIVATE_APPROVAL_SENTINEL", "PRIVATE_CHANGE_FINGERPRINT_COMMENT", "artifactId", "CodeReviewId",
+            "project-id", reviewerID, "Fixture author"
+        ] {
             XCTAssertFalse(text.contains(sentinel), sentinel)
         }
     }

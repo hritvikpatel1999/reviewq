@@ -7,6 +7,89 @@ import XCTest
 
 @MainActor
 final class DashboardLayoutTests: XCTestCase {
+    func testGreenDotsMarkAllThreeSectionsAndTheirCardsWithoutAddingHeight() async throws {
+        let assigned = fixture(number: 1)
+        let followed = fixture(number: 2, isFollowedOnly: true)
+        let authored = fixture(
+            number: 3, authoredStatus: AuthoredPullRequestStatus(activeCommentCount: 2, hasRequiredApprovals: false)
+        )
+        let changes = ReviewChanges(
+            previous: ReviewSnapshot(pullRequests: []),
+            current: ReviewSnapshot(pullRequests: [assigned, followed, authored])
+        )
+        let group = try XCTUnwrap(RepositoryGroup.grouping([assigned]).first)
+        let sections: [(Bool, ReviewChanges) -> AnyView] = [
+            { expanded, changes in
+                AnyView(RepositoryDropdown(
+                    group: group, isExpanded: .constant(expanded), open: { _ in }, openInEdge: { _ in },
+                    review: { _, _ in }, isLaunchingReview: false, changes: changes
+                ))
+            },
+            { expanded, changes in
+                AnyView(FollowedPeopleSection(
+                    requests: [followed], isExpanded: .constant(expanded), open: { _ in }, openInEdge: { _ in },
+                    review: { _, _ in }, isLaunchingReview: false, changes: changes
+                ))
+            },
+            { expanded, changes in
+                AnyView(AuthoredPullRequestsSection(
+                    requests: [authored], isExpanded: .constant(expanded), open: { _ in }, changes: changes
+                ))
+            }
+        ]
+        for scheme in [ColorScheme.light, .dark] {
+            for section in sections {
+                var additions: [Int] = []
+                for expanded in [false, true] {
+                    let before = try await capture(
+                        section(expanded, ReviewChanges()).frame(width: 392), scheme: scheme, fitContent: true
+                    )
+                    let after = try await capture(
+                        section(expanded, changes).frame(width: 392), scheme: scheme, fitContent: true
+                    )
+                    XCTAssertEqual(before.height, after.height, "Dots must not add another row.")
+                    let green = try greenPixelCount(after) - greenPixelCount(before)
+                    XCTAssertGreaterThan(green, 30, "The section header needs a green dot even while collapsed.")
+                    additions.append(green)
+                }
+                XCTAssertGreaterThan(additions[1], additions[0] + 30, "The expanded card needs its own dot.")
+            }
+        }
+    }
+
+    func testMenuBarDotPreservesTheTemplateIconAndButtonHitTargetInLightAndDarkMode() throws {
+        _ = NSApplication.shared
+        let button = NSButton(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        button.isBordered = false
+        let image = try XCTUnwrap(NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil))
+        image.isTemplate = true
+        button.image = image
+        button.imagePosition = .imageLeading
+        let dot = MenuBarChangeDot(frame: button.bounds)
+        dot.autoresizingMask = [.width, .height]
+        button.addSubview(dot)
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            button.appearance = try XCTUnwrap(NSAppearance(named: appearance))
+            for title in ["", " 1", " 120!"] {
+                button.title = title
+                button.sizeToFit()
+                button.frame.size.height = 24
+                var pixels: [Int] = []
+                for hidden in [true, false] {
+                    dot.isHidden = hidden
+                    dot.needsDisplay = true
+                    let bitmap = try XCTUnwrap(button.bitmapImageRepForCachingDisplay(in: button.bounds))
+                    button.cacheDisplay(in: button.bounds, to: bitmap)
+                    pixels.append(try greenPixelCount(XCTUnwrap(bitmap.cgImage)))
+                }
+                XCTAssertGreaterThan(pixels[1], pixels[0] + 3, "The overlay must stay green, not template-tinted.")
+                XCTAssertTrue(image.isTemplate)
+                XCTAssertNil(dot.hitTest(.zero))
+                XCTAssertTrue(button.hitTest(NSPoint(x: button.bounds.midX, y: button.bounds.midY)) === button)
+            }
+        }
+    }
+
     func testReviewStagesAreBesideDraftWithoutNumbersOrAnotherRow() throws {
         var heights: Set<Int> = []
         for stage in ReviewStage.allCases {
@@ -316,10 +399,32 @@ final class DashboardLayoutTests: XCTestCase {
         return try XCTUnwrap(renderer.cgImage)
     }
 
-    private func capture(_ view: some View) async throws -> CGImage {
+    private func greenPixelCount(_ image: CGImage) throws -> Int {
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        return try pixels.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            let context = try XCTUnwrap(CGContext(
+                data: bytes.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+                bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            var count = 0
+            for index in stride(from: 0, to: bytes.count, by: 4) {
+                let green = Double(bytes[index + 1])
+                if green > 76.5, green > Double(bytes[index]) * 1.4, green > Double(bytes[index + 2]) * 1.2 {
+                    count += 1
+                }
+            }
+            return count
+        }
+    }
+
+    private func capture(
+        _ view: some View, scheme: ColorScheme = .light, fitContent: Bool = false
+    ) async throws -> CGImage {
         _ = NSApplication.shared
         let host = NSHostingView(rootView: view
-            .environment(\.colorScheme, .light)
+            .environment(\.colorScheme, scheme)
             .environment(\.locale, Locale(identifier: "en_US"))
         )
         let window = NSWindow(
@@ -332,6 +437,12 @@ final class DashboardLayoutTests: XCTestCase {
         defer { window.close() }
         await Task.yield()
         host.layoutSubtreeIfNeeded()
+        if fitContent {
+            let height = host.intrinsicContentSize.height
+            XCTAssertGreaterThan(height, 0)
+            window.setContentSize(NSSize(width: 440, height: height))
+            host.layoutSubtreeIfNeeded()
+        }
         try await Task.sleep(for: .milliseconds(200))
         host.displayIfNeeded()
         // ImageRenderer omits AppKit-backed borderless toolbar buttons.

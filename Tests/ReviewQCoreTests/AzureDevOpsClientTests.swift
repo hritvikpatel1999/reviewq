@@ -4,6 +4,25 @@ import XCTest
 
 @MainActor
 final class AzureDevOpsClientTests: XCTestCase {
+    func testCacheScopeIsAvailableBeforeHTTPWithoutAnotherAuthenticationRequest() async throws {
+        let transport = StubTransport([connectionResponse(), pullRequestsResponse([pullRequestJSON()])])
+        let authorization = StubAuthorization(header: "Bearer synthetic-same-account")
+        let loader = AzureDevOpsReviewLoader(authorization: authorization, transport: transport)
+        let scopeReceived = expectation(description: "Local account scope was made available")
+        let result = try await loader.load(configuration: configuration(), onIdentityScope: { scope in
+            XCTAssertEqual(scope.count, 64)
+            let requests = await transport.requests
+            XCTAssertTrue(requests.isEmpty, "Cached display data must be available before PR HTTP requests start.")
+            scopeReceived.fulfill()
+        })
+        await fulfillment(of: [scopeReceived], timeout: 1)
+        let calls = await authorization.calls
+        let requests = await transport.requests
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(requests.count, 3, "The existing identity, PR, and history requests are unchanged.")
+        XCTAssertNotNil(result.identityScope)
+    }
+
     func testOnlyUnvotedActiveAssignedReviewsAreIncluded() async throws {
         let responses = [
             pullRequestJSON(number: 1),

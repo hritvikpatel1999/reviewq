@@ -110,6 +110,21 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
     public func validatedSources() throws -> [ReviewSource] {
         try validatedReviewPrompts()
         _ = try validatedFollowedAuthors()
+        let sources = try validatedSourceURLs()
+        let tenant = tenantID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if authentication == .azureCLI, !tenant.isEmpty {
+            let isDomain = tenant.range(
+                of: "^[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z0-9-]+$",
+                options: .regularExpression
+            ) != nil
+            guard UUID(uuidString: tenant) != nil || isDomain else {
+                throw ReviewQError.invalidTenant
+            }
+        }
+        return sources
+    }
+
+    public func validatedSourceURLs() throws -> [ReviewSource] {
         let lines = sourceURLs.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -122,16 +137,6 @@ public struct ReviewConfiguration: Codable, Equatable, Sendable {
                 throw ReviewQError.duplicateSource(source.displayName)
             }
             sources.append(source)
-        }
-        let tenant = tenantID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if authentication == .azureCLI, !tenant.isEmpty {
-            let isDomain = tenant.range(
-                of: "^[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z0-9-]+$",
-                options: .regularExpression
-            ) != nil
-            guard UUID(uuidString: tenant) != nil || isDomain else {
-                throw ReviewQError.invalidTenant
-            }
         }
         return sources
     }

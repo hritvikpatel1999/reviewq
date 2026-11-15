@@ -247,7 +247,9 @@ final class FollowedPeopleTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = ReviewStore(
             defaults: defaults, keychain: StubPATStore(),
-            loader: AzureDevOpsReviewLoader(authorization: StubAuthorization(), transport: transport)
+            loader: AzureDevOpsReviewLoader(
+                authorization: StubAuthorization(header: "Bearer synthetic-same-account"), transport: transport
+            )
         )
         var settings = following()
         try store.save(settings)

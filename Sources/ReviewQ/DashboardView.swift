@@ -40,10 +40,8 @@ struct DashboardView: View {
                 Text(error).font(.caption).foregroundStyle(.red)
                     .padding(.horizontal, 16).padding(.bottom, 8)
             }
-            if let snapshot = store.snapshot {
-                Divider()
-                refreshStatus(snapshot)
-            }
+            Divider()
+            footer
         }
         .frame(width: 440, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -146,7 +144,8 @@ struct DashboardView: View {
                             review: { request, assistant in
                                 Task { await app.review(request, with: assistant) }
                             },
-                            isLaunchingReview: app.isLaunchingReview
+                            isLaunchingReview: app.isLaunchingReview,
+                            changes: store.changes
                         )
                     }
                     if store.configuration.followPeople {
@@ -158,13 +157,15 @@ struct DashboardView: View {
                             review: { request, assistant in
                                 Task { await app.review(request, with: assistant) }
                             },
-                            isLaunchingReview: app.isLaunchingReview
+                            isLaunchingReview: app.isLaunchingReview,
+                            changes: store.changes
                         )
                     }
                     if store.configuration.showAuthoredPullRequests {
                         AuthoredPullRequestsSection(
                             requests: authoredRequests, isExpanded: $isAuthoredExpanded,
-                            open: { app.open($0.url) }
+                            open: { app.open($0.url) },
+                            changes: store.changes
                         )
                     }
                 }
@@ -173,12 +174,19 @@ struct DashboardView: View {
         }
     }
 
-    private func refreshStatus(_ snapshot: ReviewSnapshot) -> some View {
+    private var footer: some View {
         HStack(spacing: 3) {
-            Text(store.errorMessage == nil ? "Updated" : "Last successful update")
-            Text(snapshot.updatedAt, style: .relative)
-            Text("ago")
+            if let snapshot = store.snapshot {
+                Text(store.errorMessage == nil ? "Updated" : "Last successful update")
+                Text(snapshot.updatedAt, style: .relative)
+                Text("ago")
+            }
             Spacer()
+            Button("Run Setup") { app.showOnboarding() }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tint)
+                .help("Run or resume setup. Close Settings first to preserve unsaved edits.")
+                .accessibilityIdentifier("dashboard-run-setup")
         }
         .font(.caption).foregroundStyle(.secondary)
         .padding(14)
@@ -209,6 +217,7 @@ struct AuthoredPullRequestsSection: View {
     let requests: [ReviewPullRequest]
     @Binding var isExpanded: Bool
     let open: (ReviewPullRequest) -> Void
+    var changes = ReviewChanges()
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -218,7 +227,10 @@ struct AuthoredPullRequestsSection: View {
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(requests) { request in
-                        PullRequestRow(request: request, open: { open(request) })
+                        PullRequestRow(
+                            request: request, open: { open(request) },
+                            isChanged: changes.pullRequestIDs.contains(request.id)
+                        )
                     }
                 }
             }
@@ -227,6 +239,7 @@ struct AuthoredPullRequestsSection: View {
             HStack(spacing: 10) {
                 Label("I'm the Author", systemImage: "person.crop.circle")
                     .font(.system(size: 13, weight: .semibold))
+                if changes.authoredPullRequests { RefreshChangeDot() }
                 Spacer(minLength: 8)
                 Text("\(requests.count)")
                     .font(.caption.weight(.semibold).monospacedDigit())
@@ -237,7 +250,8 @@ struct AuthoredPullRequestsSection: View {
             }
         }
         .disclosureGroupStyle(ReviewDisclosureStyle(
-            accessibilityHint: "Show or hide pull requests authored by you"
+            accessibilityHint: "Show or hide pull requests authored by you",
+            hasChanges: changes.authoredPullRequests
         ))
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -252,6 +266,7 @@ struct FollowedPeopleSection: View {
     let openInEdge: (ReviewPullRequest) -> Void
     let review: (ReviewPullRequest, ReviewAssistant) -> Void
     let isLaunchingReview: Bool
+    var changes = ReviewChanges()
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -264,7 +279,8 @@ struct FollowedPeopleSection: View {
                         PullRequestRow(
                             request: request, open: { open(request) },
                             openInEdge: { openInEdge(request) },
-                            review: { review(request, $0) }, isLaunchingReview: isLaunchingReview
+                            review: { review(request, $0) }, isLaunchingReview: isLaunchingReview,
+                            isChanged: changes.pullRequestIDs.contains(request.id)
                         )
                     }
                 }
@@ -274,6 +290,7 @@ struct FollowedPeopleSection: View {
             HStack(spacing: 10) {
                 Label("People you follow", systemImage: "person.2")
                     .font(.system(size: 13, weight: .semibold))
+                if changes.followedPeople { RefreshChangeDot() }
                 Spacer(minLength: 8)
                 Text("\(requests.count)")
                     .font(.caption.weight(.semibold).monospacedDigit())
@@ -284,7 +301,8 @@ struct FollowedPeopleSection: View {
             }
         }
         .disclosureGroupStyle(ReviewDisclosureStyle(
-            accessibilityHint: "Show or hide pull requests from people you follow"
+            accessibilityHint: "Show or hide pull requests from people you follow",
+            hasChanges: changes.followedPeople
         ))
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -299,6 +317,7 @@ struct RepositoryDropdown: View {
     let openInEdge: (ReviewPullRequest) -> Void
     let review: (ReviewPullRequest, ReviewAssistant) -> Void
     let isLaunchingReview: Bool
+    var changes = ReviewChanges()
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -307,7 +326,8 @@ struct RepositoryDropdown: View {
                     PullRequestRow(
                         request: request, open: { open(request) },
                         openInEdge: { openInEdge(request) },
-                        review: { review(request, $0) }, isLaunchingReview: isLaunchingReview
+                        review: { review(request, $0) }, isLaunchingReview: isLaunchingReview,
+                        isChanged: changes.pullRequestIDs.contains(request.id)
                     )
                 }
             }
@@ -322,6 +342,7 @@ struct RepositoryDropdown: View {
                     Text(group.location).font(.caption2).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
+                if changes.repositoryIDs.contains(group.id) { RefreshChangeDot() }
                 Spacer(minLength: 8)
                 Text("\(group.requests.count)")
                     .font(.caption.weight(.semibold).monospacedDigit())
@@ -331,7 +352,10 @@ struct RepositoryDropdown: View {
                     .accessibilityLabel("\(group.requests.count) pending pull requests")
             }
         }
-        .disclosureGroupStyle(ReviewDisclosureStyle(accessibilityHint: "Show or hide this repository's pull requests"))
+        .disclosureGroupStyle(ReviewDisclosureStyle(
+            accessibilityHint: "Show or hide this repository's pull requests",
+            hasChanges: changes.repositoryIDs.contains(group.id)
+        ))
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityIdentifier("repository-dropdown-\(group.id)")
@@ -340,6 +364,7 @@ struct RepositoryDropdown: View {
 
 private struct ReviewDisclosureStyle: DisclosureGroupStyle {
     let accessibilityHint: String
+    var hasChanges = false
 
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -358,16 +383,29 @@ private struct ReviewDisclosureStyle: DisclosureGroupStyle {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityValue(
+                (configuration.isExpanded ? "Expanded" : "Collapsed")
+                    + (hasChanges ? ", changed since previous successful refresh" : "")
+            )
             .accessibilityHint(accessibilityHint)
             if configuration.isExpanded { configuration.content }
         }
     }
 }
 
+struct RefreshChangeDot: View {
+    var body: some View {
+        Circle().fill(Color(nsColor: .systemGreen))
+            .frame(width: 6, height: 6)
+            .help("Changed since the previous successful refresh")
+            .accessibilityHidden(true)
+    }
+}
+
 struct PullRequestRow: View {
     let request: ReviewPullRequest
     let open: () -> Void
+    let isChanged: Bool
     private let actions: Actions
     @State private var isHovered = false
 
@@ -376,18 +414,20 @@ struct PullRequestRow: View {
         case review(openInEdge: () -> Void, review: (ReviewAssistant) -> Void, isLaunching: Bool)
     }
 
-    init(request: ReviewPullRequest, open: @escaping () -> Void) {
+    init(request: ReviewPullRequest, open: @escaping () -> Void, isChanged: Bool = false) {
         self.request = request
         self.open = open
+        self.isChanged = isChanged
         actions = .browser
     }
 
     init(
         request: ReviewPullRequest, open: @escaping () -> Void, openInEdge: @escaping () -> Void,
-        review: @escaping (ReviewAssistant) -> Void, isLaunchingReview: Bool
+        review: @escaping (ReviewAssistant) -> Void, isLaunchingReview: Bool, isChanged: Bool = false
     ) {
         self.request = request
         self.open = open
+        self.isChanged = isChanged
         actions = request.authoredStatus == nil
             ? .review(openInEdge: openInEdge, review: review, isLaunching: isLaunchingReview) : .browser
     }
@@ -397,6 +437,7 @@ struct PullRequestRow: View {
             Button(action: open) {
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
+                        if isChanged { RefreshChangeDot() }
                         if request.isRequired {
                             Text("Required").font(.system(size: 10, weight: .medium))
                                 .padding(.horizontal, 6).padding(.vertical, 2)
@@ -440,6 +481,7 @@ struct PullRequestRow: View {
                 "Pull request: \(request.title), by \(request.authorLabel)"
                     + (request.authoredStatus == nil
                        ? ", \(request.reviewStageLabel)" : request.authoredStatusLabel.map { ", \($0)" } ?? "")
+                    + (isChanged ? ", changed since previous successful refresh" : "")
             )
             .help("Open pull request in your browser")
 
