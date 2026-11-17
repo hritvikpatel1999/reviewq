@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     let diagnostics: DiagnosticsStore
     let menuShortcut: GlobalShortcutStore
     let onboarding: OnboardingStore
+    let updates: UpdateStore
     @Published var actionError: String?
     @Published private(set) var isLaunchingReview = false
     private let reviewLauncher: any ReviewLaunching
@@ -76,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
         reviewLauncher: any ReviewLaunching = ReviewLauncher(),
         shortcutRegistrar: (any GlobalShortcutRegistering)? = nil, onboarding: OnboardingStore? = nil,
+        updates: UpdateStore? = nil,
         popover: NSPopover = NSPopover(),
         openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) },
         terminateApplication: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) },
@@ -88,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         self.terminateApplication = terminateApplication
         self.popover = popover
         self.onboarding = onboarding ?? OnboardingStore(store: store, diagnostics: diagnostics.logger)
+        self.updates = updates ?? UpdateStore(diagnostics: diagnostics.logger)
         self.presentReviewError = presentReviewError
         menuShortcut = GlobalShortcutStore(
             registrar: shortcutRegistrar ?? CarbonShortcutRegistrar(diagnostics: diagnostics.logger),
@@ -133,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             .sink { [weak self] _ in
                 self?.diagnostics.logger.log(.info, .wake)
                 self?.store.requestRefresh()
+                self?.updates.requestCheck()
             }
             .store(in: &subscriptions)
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
@@ -155,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         updateStatusItem()
         startMenuShortcut()
         store.start()
+        updates.requestCheck()
         if CommandLine.arguments.contains("--diagnostics") {
             showDiagnostics()
         } else if CommandLine.arguments.contains("--setup") || onboarding.shouldPresentAutomatically {
@@ -180,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     func applicationWillTerminate(_ notification: Notification) {
         closePopover()
         onboarding.pause()
+        updates.cancel()
         menuShortcut.stop()
         store.stop()
         diagnostics.recordShutdown()
@@ -214,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         popover.contentViewController?.view.window?.makeKey()
         button.highlight(true)
         startPopoverDismissalMonitoring()
+        updates.requestCheck()
     }
 
     func closePopover() {

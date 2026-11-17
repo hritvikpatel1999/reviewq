@@ -276,10 +276,17 @@ final class OnboardingFixture {
     let checks = SetupConnectionSpy()
     let store: ReviewStore
     let model: OnboardingStore
+    let updateClient = SetupUpdateClient()
+    let updateClock = SetupUpdateClock()
+    let updates: UpdateStore
 
     init(checkConnection: OnboardingStore.ConnectionCheck? = nil) throws {
         defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         store = ReviewStore(defaults: defaults, keychain: keychain, loader: loader)
+        let clock = updateClock
+        updates = UpdateStore(
+            currentVersion: "3.1.1", defaults: defaults, client: updateClient, clock: { clock.now }
+        )
         let checks = checks
         model = OnboardingStore(
             store: store, defaults: defaults, keychain: keychain,
@@ -320,8 +327,38 @@ final class OnboardingFixture {
 
     func close() {
         model.pause()
+        updates.cancel()
         store.stop()
         defaults.removePersistentDomain(forName: suite)
+    }
+}
+
+@MainActor
+final class SetupUpdateClock {
+    var now = Date()
+}
+
+actor SetupUpdateClient: UpdateChecking {
+    private var result = UpdateCheckResult.modified(release: nil, entityTag: nil)
+    private var error: URLError?
+    private var nextCheck: (@Sendable () -> Void)?
+    private(set) var calls = 0
+
+    func setResult(_ value: UpdateCheckResult) {
+        result = value
+        error = nil
+    }
+
+    func fail() { error = URLError(.notConnectedToInternet) }
+
+    func onNextCheck(_ action: @escaping @Sendable () -> Void) { nextCheck = action }
+
+    func check(entityTag: String?) throws -> UpdateCheckResult {
+        calls += 1
+        nextCheck?()
+        nextCheck = nil
+        if let error { throw error }
+        return result
     }
 }
 

@@ -5,9 +5,16 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var store: ReviewStore
     @ObservedObject var app: AppDelegate
+    @ObservedObject var updates: UpdateStore
     @State private var expandedRepositoryIDs: Set<String> = []
     @State private var isFollowedPeopleExpanded = false
     @State private var isAuthoredExpanded = false
+
+    init(store: ReviewStore, app: AppDelegate) {
+        self.store = store
+        self.app = app
+        updates = app.updates
+    }
 
     private var groups: [RepositoryGroup] {
         RepositoryGroup.grouping(store.snapshot?.pullRequests ?? [])
@@ -26,6 +33,10 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let update = updates.bannerUpdate {
+                updateBanner(update)
+                Divider()
+            }
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -45,6 +56,40 @@ struct DashboardView: View {
         }
         .frame(width: 440, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func updateBanner(_ update: AvailableUpdate) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(.tint)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text("ReviewQ v\(update.version) is out")
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button("View Updates") { app.open(update.releaseURL) }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tint)
+                .fixedSize()
+                .help("Open this release on GitHub. Download and install it manually.")
+                .accessibilityIdentifier("app-update-link")
+            Button { updates.dismissUpdate() } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .accessibilityLabel("Dismiss update for version \(update.version)")
+            .accessibilityIdentifier("app-update-dismiss")
+            .help("Hide this version's banner. The next release will appear again.")
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("app-update-banner")
     }
 
     private var header: some View {

@@ -23,6 +23,8 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case loginItemChanged, loginItemFailed, browserOpenFailed, applicationActionFailed, diagnosticsOpened
     case reviewLaunchStarted, reviewLaunchFinished, reviewLaunchFailed
     case shortcutRegistered, shortcutPressed, shortcutRegistrationFailed, shortcutUnregistrationFailed
+    case updateCheckStarted, updateCheckFinished, updateCheckFailed, updateCheckCancelled
+    case updateCacheInvalidated, updateCacheWriteFailed
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
@@ -30,6 +32,7 @@ public enum DiagnosticOperation: String, Codable, Sendable {
     case azureCLI, personalAccessToken, settings, loginItem, browser, application
     case scout, copilot
     case shortcut
+    case appUpdates
 }
 
 public enum DiagnosticReason: String, Codable, Sendable {
@@ -53,6 +56,9 @@ public struct DiagnosticFailure: Sendable {
             systemCode = error.code.rawValue
         } else if error is DecodingError {
             reason = .decoding
+        } else if let error = error as? UpdateCheckError {
+            reason = error.diagnosticReason
+            if case .http(let code, _, _) = error { status = code }
         } else if let error = error as? ReviewQError {
             switch error {
             case .noSources, .invalidSource, .duplicateSource, .invalidTenant, .reviewPromptTooLong, .invalidReviewPrompt,
