@@ -9,7 +9,7 @@ future version, not included in this release.
 
 ## Features
 
-- Native pull-request icon with the pending-review count.
+- Native pull-request icon counting only PRs assigned to you for review, excluding followed-only and authored PRs.
 - Green dots on the menu-bar icon, affected sections, and PRs changed since the previous successful refresh.
 - A bundled application icon for Finder, Spotlight, and app launchers.
 - Newest-first repository dropdowns with pending counts, author, age, review-stage labels, and one-click browser links.
@@ -64,8 +64,8 @@ PAT must be entered again. Completed setup is recorded under `reviewOnboardingCo
 Launch-at-login changes are applied immediately, as in Settings, and remain independently
 configurable through macOS.
 
-To revisit setup, close Settings and click **Run Setup** at the bottom-right of the menu-bar queue,
-beside its update time. The button is also available before a queue has loaded. Setup refuses to
+To revisit setup, close Settings and click **Setup** in the menu-bar queue's header, before
+Refresh and Settings. The button is also available before a queue has loaded. Setup refuses to
 discard an open Settings editor. A replay starts from the latest saved preferences; **Keep existing
 settings** abandons the replay without replacing them. Advanced assistant prompts, caches, and
 logs remain in Settings/Diagnostics. Developers can also start the app with `--setup`.
@@ -241,15 +241,40 @@ icon-resource, compiled-binary UUID, and checksum checks.
 The [version 3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.0.0) remains available.
 Read the [cached startup details](#cached-startup-queue) before relying on an older displayed status.
 
-## Download version 3.1
+## What's new in version 3.1.1
 
-Download from the [ReviewQ v3.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.0).
+Version **3.1.1 / build 8** fixes queue toggling and refines the dashboard:
+
+- Prevent a status-icon click from closing the queue on mouse-down and reopening it on mouse-up.
+  Click-away handling excludes the icon even for windowless macOS events; actual app switches,
+  outside clicks, Escape, and Command-Option-Q continue to dismiss or toggle the queue.
+- Count only PRs assigned to you for review in the menu bar and pending-review header.
+  Followed-only and authored PRs remain visible in their enabled sections without inflating that count.
+- Place header actions in this order: **Setup, Refresh, Settings, Power (Quit)**.
+  The footer keeps the update time on the left and a **By: Hritvik Patel** GitHub link on the right.
+
+The fixes add no network requests, polling timers, dependencies, or permission requirements.
+Existing settings, cached queues, Keychain credentials, and refresh-change dot semantics are unchanged.
+Native interaction regressions cover repeated icon/shortcut toggles, windowless status clicks,
+click-away, Escape, app activation, and light/dark/cached-loading toolbar actions.
+
+Release validation passed **235 tests on Apple Silicon and 235 on Intel/Rosetta**, with the same five
+documented host-dependent OCR exclusions. Both extracted ZIP payloads passed checksum, strict/deep
+signature, architecture, version/build, macOS minimum, bundle-identity, icon, and compiled-UUID checks.
+Live desktop click verification was unavailable; testing used in-process native events and synthetic
+Azure DevOps data rather than physical Intel hardware or live-service benchmarks.
+
+The [version 3.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.0) remains available.
+
+## Download version 3.1.1
+
+Download from the [ReviewQ v3.1.1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.1).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-3.1.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-3.1.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-3.1.1-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-3.1.1-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -301,9 +326,15 @@ sh scripts/build-app.sh
 open dist/ReviewQ.app
 ```
 
-The app has no Dock icon. Click its pull-request icon in the menu bar. First launch opens
-setup; configured installations skip it. Reopening an already-running app brings Settings
-forward, or resumes unfinished setup.
+The app has no Dock icon. Click its pull-request icon in the menu bar, or press Command-Option-Q,
+to toggle the queue: either input closes an open queue and opens a closed one. Clicking outside,
+switching apps, or pressing Escape also closes it. First launch opens setup; configured
+installations skip it. Reopening an already-running app brings Settings forward, or resumes
+unfinished setup. The subtle **By: Hritvik Patel** link at the footer's bottom-right, beside the
+update time, opens [the creator's GitHub profile](https://github.com/hritvikpatel1999) in your default browser.
+
+Menu-bar clicks are excluded from click-away handling even when macOS reports them without an app
+window. Temporary menu-bar deactivation does not close the queue before the button's toggle.
 
 The default build uses the host architecture and outputs `dist/ReviewQ.app`. Quit the app before
 rebuilding that output. You can copy it to Applications before enabling launch at login.
@@ -420,8 +451,9 @@ The AI buttons are temporarily disabled while a launch is in progress to avoid d
 
 Reviews within each repository are sorted by **creation time, newest first**. PR numbers and
 the redundant "old" age suffix are hidden from the rows. A small previous-review status appears
-beside Draft when applicable, without adding another row. Quit sits immediately to the left of Refresh; Settings
-is available from the header's gear icon. The redundant bottom action row has been removed.
+beside Draft when applicable, without adding another row. Header actions run left to right:
+Setup, Refresh, Settings (gear), then Quit (power icon), separated from Settings by a divider.
+The footer keeps the update time on the left and the creator's GitHub link on the right.
 
 The queue still includes only assigned active PRs that currently need your vote. Statuses describe
 your **last recorded nonzero vote**, or your comment history when no nonzero vote was found,
@@ -547,7 +579,8 @@ It includes other active PRs created by these people, even when you are not a re
 PRs already shown in a repository section are not duplicated. The cards, browser/assistant actions,
 review-history labels, and newest-first sorting are unchanged; followed cards show
 **`{author} in {repo-name}`** instead of just the author. No organization name is added to that line.
-The menu-bar and header counts include both sections, counting each PR once.
+Followed-only PRs do not increase the menu-bar or header's pending-review count. A followed author's
+PR that also needs your review appears in its repository section and counts once.
 
 Following searches **all accessible projects in each configured organization**, even when a review
 source is a project-specific URL. It never searches an unconfigured organization. The draft preference

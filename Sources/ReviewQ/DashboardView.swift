@@ -61,25 +61,43 @@ struct DashboardView: View {
                 }
             }
             Spacer()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+            Button("Setup") { app.showOnboarding() }
                 .font(.caption)
-                .help("Quit ReviewQ")
+                .foregroundStyle(.tint)
+                .fixedSize()
+                .help("Run or resume setup. Close Settings first to preserve unsaved edits.")
+                .accessibilityIdentifier("dashboard-run-setup")
             if store.isRefreshing {
-                ProgressView().controlSize(.small).frame(width: 24)
+                ProgressView().controlSize(.small).frame(width: 24, height: 24)
                     .accessibilityLabel("Refreshing pull requests")
+                    .accessibilityIdentifier("dashboard-refresh")
             } else {
                 Button { store.requestRefresh() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
+                .frame(width: 24, height: 24)
                 .disabled(!store.configuration.hasSources)
                 .help("Refresh reviews")
+                .accessibilityLabel("Refresh reviews")
+                .accessibilityIdentifier("dashboard-refresh")
                 .keyboardShortcut("r", modifiers: .command)
             }
             Button { app.showSettings() } label: { Image(systemName: "gearshape") }
+                .frame(width: 24, height: 24)
                 .help("Settings")
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("dashboard-settings")
                 .contextMenu {
                     Button("Diagnostics...") { app.showDiagnostics() }
                 }
+            Divider().frame(height: 16)
+            Button { app.quit() } label: {
+                Image(systemName: "power")
+            }
+            .frame(width: 24, height: 24)
+            .help("Quit ReviewQ")
+            .accessibilityLabel("Quit ReviewQ")
+            .accessibilityIdentifier("dashboard-quit")
         }
         .buttonStyle(.borderless)
         .padding(16)
@@ -182,11 +200,12 @@ struct DashboardView: View {
                 Text("ago")
             }
             Spacer()
-            Button("Run Setup") { app.showOnboarding() }
+            Button("By: Hritvik Patel") {
+                app.openDocumentation("https://github.com/hritvikpatel1999")
+            }
                 .buttonStyle(.borderless)
-                .foregroundStyle(.tint)
-                .help("Run or resume setup. Close Settings first to preserve unsaved edits.")
-                .accessibilityIdentifier("dashboard-run-setup")
+                .help("Open Hritvik Patel's GitHub profile")
+                .accessibilityIdentifier("dashboard-creator-link")
         }
         .font(.caption).foregroundStyle(.secondary)
         .padding(14)
