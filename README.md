@@ -24,6 +24,7 @@ future version, not included in this release.
 - Persistent, account-scoped user/author identity caches with a manual re-lookup control.
 - Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
 - Restore the last successful queue while a startup refresh loads fresh data for the same account.
+- A dismissible new-release banner with **View Updates** and a manual update check in Settings.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
 - Optional personal access token stored only in macOS Keychain.
 - Settings, optional draft PRs, and launch at login.
@@ -31,6 +32,35 @@ future version, not included in this release.
 - Native Select All, Copy, Paste, Cut, Undo, and Redo shortcuts in Settings.
 - Visible authentication/network errors; failed refreshes never masquerade as an empty queue.
 - Local diagnostics with opt-in verbose logging, correlated request outcomes, and private ZIP exports.
+
+## App update notifications
+
+ReviewQ checks its public GitHub latest-release metadata in the background when it launches, wakes,
+or opens the queue, only if the previous successful check was at least 24 hours ago.
+PR refreshes do not check for app updates. Checks are independent of Azure DevOps authentication and
+PR loading, require no GitHub account or token, and add at most one concurrent update request.
+No background service or update timer runs while the app is closed.
+
+A newer stable version shows a blue-accented banner beneath the queue toolbar. **View Updates**
+opens that release's GitHub page for manual download and installation; ReviewQ does not download,
+replace, or relaunch itself. Quit the old instance before installing the replacement.
+The **x** dismisses only that version, including across app restarts. A later release appears again.
+After upgrading, the banner disappears automatically. Drafts, prereleases, and older/equal versions
+are not offered; versions are compared numerically.
+
+**Settings > App updates > Check for Updates** bypasses the daily interval, but still honors GitHub's
+rate-limit and retry deadlines. Dismissed updates remain accessible there. Offline or invalid responses
+preserve the cached release and last successful check, back off automatic retries, and log a safe
+failure category in Diagnostics. A failed manual check shows an error rather than claiming the app
+is up to date.
+
+The local `reviewAppUpdates` preference stores only release metadata, ETag, check/retry times, and the
+dismissed version; it contains no credentials or PR data. GitHub receives the normal public HTTPS
+request, including your network's IP address, but no Azure DevOps credentials or queue contents.
+Conditional requests reduce response size; anonymous requests still share GitHub's per-IP rate
+limits. Update notifications do not alter the green changes-since-refresh dots or pending-review count.
+Checks require a packaged app with a valid bundle version; `swift run` development builds may not
+include that metadata.
 
 ## First-run setup
 
@@ -266,15 +296,42 @@ Azure DevOps data rather than physical Intel hardware or live-service benchmarks
 
 The [version 3.1.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.0) remains available.
 
-## Download version 3.1.1
+## What's new in version 3.2
 
-Download from the [ReviewQ v3.1.1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.1).
+Version **3.2.0 / build 9** adds app update notifications:
+
+- A compact, dismissible banner beneath the queue toolbar with **View Updates**, opening the
+  official release page for manual download and installation.
+- Cached daily release checks when ReviewQ launches, wakes, or opens its queue. PR refreshes remain
+  independent; no GitHub sign-in, extra dependency, background service, or new permission is required.
+- **Settings > App updates > Check for Updates**, including access to dismissed releases and visible
+  failures. Manual checks bypass the daily interval but honor GitHub retry/rate-limit deadlines.
+- Numeric stable-version comparison, conditional ETag requests, per-version dismissal across
+  restarts, and cached release information retained during failures.
+
+ReviewQ does not automatically download, install, replace, or relaunch itself.
+Existing Azure DevOps settings, saved credentials, queue caches, menu toggling, pending-review counts,
+and green changes-since-refresh dots are unchanged. GitHub PR integration remains out of scope.
+See [App update notifications](#app-update-notifications) for cadence, privacy, and failure handling.
+
+Release validation ran **250 tests per architecture** with the same five documented OCR exclusions.
+**248 passed on Apple Silicon and 248 on Intel/Rosetta**; two unchanged native clipboard tests
+failed with three assertions, and the same failures reproduced on the unchanged v3.1.1 baseline.
+All 15 new update tests and the expanded lifecycle/shortcut regression passed on both architectures.
+No tests were removed, weakened, or newly excluded. Both ZIP payloads passed signature, architecture,
+version/build, macOS minimum, icon-resource, compiled-UUID, and checksum verification.
+
+The [version 3.1.1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.1) remains available.
+
+## Download version 3.2
+
+Download from the [ReviewQ v3.2.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.2.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-3.1.1-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-3.1.1-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-3.2.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-3.2.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -288,7 +345,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 3.1 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 3.2 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.

@@ -4,6 +4,7 @@ struct HTTPResult: Sendable {
     let data: Data
     let status: Int
     var continuationToken: String?
+    var headers: [String: String] = [:]
 }
 
 protocol HTTPTransport: Sendable {
@@ -23,8 +24,10 @@ final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
 
 struct URLSessionTransport: HTTPTransport {
     private let session: URLSession
+    private let serviceName: String
 
-    init() {
+    init(serviceName: String = "Azure DevOps") {
+        self.serviceName = serviceName
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
@@ -37,11 +40,14 @@ struct URLSessionTransport: HTTPTransport {
     func send(_ request: URLRequest) async throws -> HTTPResult {
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else {
-            throw ReviewQError.invalidResponse("Azure DevOps")
+            throw ReviewQError.invalidResponse(serviceName)
         }
         return HTTPResult(
             data: data, status: response.statusCode,
-            continuationToken: response.value(forHTTPHeaderField: "x-ms-continuationtoken")
+            continuationToken: response.value(forHTTPHeaderField: "x-ms-continuationtoken"),
+            headers: response.allHeaderFields.reduce(into: [:]) { headers, field in
+                headers[String(describing: field.key).lowercased()] = String(describing: field.value)
+            }
         )
     }
 }

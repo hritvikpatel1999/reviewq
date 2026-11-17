@@ -88,7 +88,7 @@ final class GlobalShortcutTests: XCTestCase {
         let popover = NSPopover()
         let app = AppDelegate(
             store: fixture.store, diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
-            shortcutRegistrar: registrar, onboarding: fixture.model, popover: popover
+            shortcutRegistrar: registrar, onboarding: fixture.model, updates: fixture.updates, popover: popover
         )
         defer {
             app.closePopover()
@@ -124,6 +124,26 @@ final class GlobalShortcutTests: XCTestCase {
             XCTAssertTrue(popover.isShown)
             await Task.yield()
         }
+        let startupChecks = await fixture.updateClient.calls
+        XCTAssertEqual(startupChecks, 1, "Launch and repeated queue openings share the same daily check.")
+        await fixture.store.refresh()
+        let checksAfterPRRefresh = await fixture.updateClient.calls
+        XCTAssertEqual(checksAfterPRRefresh, startupChecks, "PR refreshes must not check application releases.")
+        fixture.updateClock.now.addTimeInterval(24 * 3_600)
+        let queueCheck = expectation(description: "Opening the queue checks when the daily interval has elapsed")
+        await fixture.updateClient.onNextCheck { queueCheck.fulfill() }
+        registrar.action?()
+        registrar.action?()
+        await fulfillment(of: [queueCheck], timeout: 2)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(fixture.updates.isChecking)
+        fixture.updateClock.now.addTimeInterval(24 * 3_600)
+        let wakeCheck = expectation(description: "Waking checks app updates when due")
+        await fixture.updateClient.onNextCheck { wakeCheck.fulfill() }
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: NSWorkspace.shared)
+        await fulfillment(of: [wakeCheck], timeout: 2)
+        let checksAfterWake = await fixture.updateClient.calls
+        XCTAssertEqual(checksAfterWake, 3)
     }
 
     func testClickAwayEscapeAndAppSwitchCloseTheQueueAndAllowReopening() async throws {
@@ -141,7 +161,7 @@ final class GlobalShortcutTests: XCTestCase {
         let popover = NSPopover()
         let app = AppDelegate(
             store: fixture.store, diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
-            shortcutRegistrar: registrar, onboarding: fixture.model, popover: popover
+            shortcutRegistrar: registrar, onboarding: fixture.model, updates: fixture.updates, popover: popover
         )
         let outside = NSWindow(
             contentRect: NSRect(x: 100, y: 100, width: 200, height: 100),

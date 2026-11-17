@@ -11,7 +11,7 @@ final class OnboardingWindowTests: XCTestCase {
         for dark in [false, true] {
             let fixture = try OnboardingFixture()
             defer { fixture.close() }
-            let app = AppDelegate(store: fixture.store, onboarding: fixture.model)
+            let app = AppDelegate(store: fixture.store, onboarding: fixture.model, updates: fixture.updates)
             let host = NSHostingView(rootView: OnboardingView(model: fixture.model, app: app)
                 .environment(\.colorScheme, dark ? .dark : .light)
                 .environment(\.locale, Locale(identifier: "en_US"))
@@ -42,7 +42,7 @@ final class OnboardingWindowTests: XCTestCase {
         let fixture = try OnboardingFixture()
         defer { fixture.close() }
         fixture.model.begin()
-        let app = AppDelegate(store: fixture.store, onboarding: fixture.model)
+        let app = AppDelegate(store: fixture.store, onboarding: fixture.model, updates: fixture.updates)
         let host = NSHostingView(rootView: OnboardingView(model: fixture.model, app: app))
         let window = makeWindow(host)
         defer { window.close() }
@@ -86,7 +86,7 @@ final class OnboardingWindowTests: XCTestCase {
             let app = AppDelegate(
                 store: fixture.store,
                 diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
-                onboarding: fixture.model,
+                onboarding: fixture.model, updates: fixture.updates,
                 openURL: { openedURLs.append($0); return openedURLs.count != 2 },
                 terminateApplication: { quitRequests += 1 }
             )
@@ -151,6 +151,108 @@ final class OnboardingWindowTests: XCTestCase {
         }
     }
 
+    func testUpdateBannerFitsBelowTheToolbarAndPreservesTheQueueInBothAppearances() async throws {
+        for dark in [false, true] {
+            let fixture = try OnboardingFixture()
+            defer { fixture.close() }
+            var configuration = ReviewConfiguration()
+            configuration.sourceURLs = "https://dev.azure.com/example/Project"
+            try fixture.store.save(configuration)
+            await fixture.store.refresh()
+            let snapshot = fixture.store.snapshot
+            let menuTitle = fixture.store.menuBarTitle
+            let release = try AvailableUpdate(
+                version: "3.1.2",
+                releaseURL: XCTUnwrap(URL(string: "https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.2"))
+            )
+            await fixture.updateClient.setResult(.modified(release: release, entityTag: "\"banner\""))
+            await fixture.updates.check()
+            var openedURLs: [URL] = []
+            let app = AppDelegate(
+                store: fixture.store, onboarding: fixture.model, updates: fixture.updates,
+                openURL: { openedURLs.append($0); return openedURLs.count > 1 }
+            )
+            let host = NSHostingView(rootView: DashboardView(store: fixture.store, app: app)
+                .environment(\.colorScheme, dark ? .dark : .light)
+                .environment(\.locale, Locale(identifier: "en_US"))
+            )
+            let window = makeWindow(host)
+            defer { window.close() }
+            window.setContentSize(NSSize(width: 440, height: 540))
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            try await settle(host)
+            let image = try capture(host)
+            let setup = try text("Setup", in: image)
+            let title = try text("ReviewQ v3.1.2 is out", in: image)
+            let link = try text("View Updates", in: image)
+            XCTAssertLessThan(title.maxY, setup.minY, "Updates belong below the unchanged toolbar.")
+            XCTAssertGreaterThan(title.minY, 0.7)
+            XCTAssertLessThan(title.maxX, link.minX)
+            XCTAssertEqual(title.midY, link.midY, accuracy: 3 / host.bounds.height)
+            XCTAssertLessThan(try text("By: Hritvik Patel", in: image).maxY, 0.1)
+            try exportPreview(image, name: "update-banner-\(dark ? "dark" : "light")")
+
+            try press("View Updates", in: host)
+            XCTAssertEqual(openedURLs, [release.releaseURL])
+            XCTAssertNotNil(app.actionError, "Browser failures must remain visible.")
+            XCTAssertEqual(fixture.updates.bannerUpdate, release)
+            try await settle(host)
+            try press("View Updates", in: host)
+            XCTAssertEqual(openedURLs, [release.releaseURL, release.releaseURL])
+            XCTAssertNil(app.actionError)
+            try await settle(host)
+            let dismissY = rect(try text("View Updates", in: capture(host)), in: host).midY
+            try press(at: NSPoint(x: host.bounds.maxX - 28, y: dismissY), in: host)
+            XCTAssertNil(fixture.updates.bannerUpdate)
+            XCTAssertEqual(fixture.updates.availableUpdate, release)
+            XCTAssertEqual(fixture.store.snapshot, snapshot)
+            XCTAssertEqual(fixture.store.menuBarTitle, menuTitle)
+            let reopened = UpdateStore(currentVersion: "3.1.1", defaults: fixture.defaults, client: fixture.updateClient)
+            XCTAssertNil(reopened.bannerUpdate)
+            let checks = await fixture.updateClient.calls
+            XCTAssertEqual(checks, 1, "Opening or dismissing a release must not make another update request.")
+        }
+    }
+
+    func testSettingsCanManuallyCheckAndOpenADismissedUpdateAndShowFailures() async throws {
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        let release = try AvailableUpdate(
+            version: "3.1.2",
+            releaseURL: XCTUnwrap(URL(string: "https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.2"))
+        )
+        await fixture.updateClient.setResult(.modified(release: release, entityTag: nil))
+        var openedURLs: [URL] = []
+        let host = NSHostingView(rootView: UpdateSettings(updates: fixture.updates, open: { openedURLs.append($0) })
+            .padding(24)
+            .frame(width: 560, height: 380, alignment: .topLeading)
+            .environment(\.locale, Locale(identifier: "en_US"))
+        )
+        let window = makeWindow(host)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 560, height: 380))
+        try await settle(host)
+        try press("Check for Updates", in: host)
+        try await settle(host)
+        var checks = await fixture.updateClient.calls
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(fixture.updates.availableUpdate, release)
+        fixture.updates.dismissUpdate()
+        try await settle(host)
+        try press("View Updates", in: host)
+        XCTAssertEqual(openedURLs, [release.releaseURL])
+        await fixture.updateClient.fail()
+        try press("Check for Updates", in: host)
+        try await settle(host)
+        checks = await fixture.updateClient.calls
+        XCTAssertEqual(checks, 2, "A manual check bypasses the successful daily interval.")
+        XCTAssertNotNil(fixture.updates.errorMessage)
+        try exportPreview(capture(host), name: "update-settings-failure")
+        XCTAssertNotNil(try text("Could not check for ReviewQ updates.", in: capture(host), matchingPrefix: true))
+        XCTAssertEqual(fixture.updates.availableUpdate, release)
+        XCTAssertNil(fixture.store.snapshot, "Checking app updates must not fetch PRs.")
+    }
+
     func testRelaunchedDashboardShowsCachedRepositoriesAndUpdateTimeWhileRefreshing() async throws {
         let fixture = try OnboardingFixture()
         defer { fixture.close() }
@@ -171,7 +273,7 @@ final class OnboardingWindowTests: XCTestCase {
         let loader = CachedStartupLoader(scope: scope)
         let store = ReviewStore(defaults: fixture.defaults, keychain: fixture.keychain, loader: loader)
         defer { store.stop() }
-        let app = AppDelegate(store: store, onboarding: fixture.model)
+        let app = AppDelegate(store: store, onboarding: fixture.model, updates: fixture.updates)
         let host = NSHostingView(rootView: DashboardView(store: store, app: app)
             .environment(\.colorScheme, .light)
             .environment(\.locale, Locale(identifier: "en_US"))
@@ -205,7 +307,7 @@ final class OnboardingWindowTests: XCTestCase {
     func testSetupWindowReusesAndResumesWithoutLosingAnOpenSettingsWindow() async throws {
         let fixture = try OnboardingFixture()
         defer { fixture.close() }
-        let app = AppDelegate(store: fixture.store, onboarding: fixture.model)
+        let app = AppDelegate(store: fixture.store, onboarding: fixture.model, updates: fixture.updates)
         defer { closeWindows() }
         app.showSettings()
         let settings = try XCTUnwrap(NSApplication.shared.windows.first { $0.title == "ReviewQ Settings" && $0.isVisible })
@@ -238,7 +340,7 @@ final class OnboardingWindowTests: XCTestCase {
         let diagnostics = DiagnosticsStore(logger: .disabled, defaults: fixture.defaults)
         let app = AppDelegate(
             store: fixture.store, diagnostics: diagnostics,
-            shortcutRegistrar: SetupShortcutRegistrar(), onboarding: fixture.model
+            shortcutRegistrar: SetupShortcutRegistrar(), onboarding: fixture.model, updates: fixture.updates
         )
         defer { app.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)); closeWindows() }
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -253,7 +355,7 @@ final class OnboardingWindowTests: XCTestCase {
         XCTAssertFalse(existing.shouldPresentAutomatically)
         let restored = AppDelegate(
             store: fixture.store, diagnostics: diagnostics,
-            shortcutRegistrar: SetupShortcutRegistrar(), onboarding: existing
+            shortcutRegistrar: SetupShortcutRegistrar(), onboarding: existing, updates: fixture.updates
         )
         restored.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         XCTAssertFalse(NSApplication.shared.windows.contains { $0.title == "ReviewQ Setup" && $0.isVisible })

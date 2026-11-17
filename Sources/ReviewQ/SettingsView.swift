@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject var app: AppDelegate
     @ObservedObject var loginItem: LoginItemStore
     @ObservedObject var menuShortcut: GlobalShortcutStore
+    @ObservedObject var updates: UpdateStore
     @State private var draft: ReviewConfiguration
     @State private var token = ""
     @State private var formError: String?
@@ -17,6 +18,7 @@ struct SettingsView: View {
         self.app = app
         self.loginItem = loginItem
         menuShortcut = app.menuShortcut
+        updates = app.updates
         _draft = State(initialValue: store.configuration)
     }
 
@@ -41,6 +43,7 @@ struct SettingsView: View {
                     preferences
                     startup
                     identityCache
+                    UpdateSettings(updates: updates, open: app.open)
                     if let error = store.errorMessage {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.red)
@@ -271,6 +274,52 @@ struct SettingsView: View {
             formError = error.localizedDescription
             didSave = false
         }
+    }
+}
+
+struct UpdateSettings: View {
+    @ObservedObject var updates: UpdateStore
+    let open: (URL) -> Void
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(updates.currentVersion.map { "ReviewQ v\($0)" } ?? "ReviewQ development build")
+                    .font(.callout.weight(.medium))
+                Text("Checks for new releases once a day when ReviewQ launches, wakes, or opens its queue. Updates are installed manually.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button("Check for Updates") { updates.requestCheck(manually: true) }
+                        .disabled(updates.isChecking)
+                        .accessibilityIdentifier("check-for-app-updates")
+                    if updates.isChecking {
+                        ProgressView().controlSize(.small)
+                            .accessibilityLabel("Checking for ReviewQ updates")
+                    }
+                }
+                if let update = updates.availableUpdate {
+                    Text("ReviewQ v\(update.version) is available.")
+                        .font(.caption)
+                    Button("View Updates") { open(update.releaseURL) }
+                        .buttonStyle(.link)
+                        .help("Open the release page for manual download and installation.")
+                } else if updates.lastCheckedAt != nil, !updates.isChecking, updates.errorMessage == nil {
+                    Text("You're up to date.").font(.caption).foregroundStyle(.secondary)
+                }
+                if let checked = updates.lastCheckedAt {
+                    HStack(spacing: 3) {
+                        Text("Last checked")
+                        Text(checked, style: .relative)
+                        Text("ago")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = updates.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        } label: { Label("App updates", systemImage: "arrow.down.circle") }
     }
 }
 
