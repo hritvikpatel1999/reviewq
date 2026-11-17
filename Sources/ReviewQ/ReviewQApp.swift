@@ -58,13 +58,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     @Published var actionError: String?
     @Published private(set) var isLaunchingReview = false
     private let reviewLauncher: any ReviewLaunching
+    private let openURL: @MainActor (URL) -> Bool
+    private let terminateApplication: @MainActor () -> Void
     private let presentReviewError: @MainActor (ReviewLaunchError) -> Void
-    private let popover = NSPopover()
+    private let popover: NSPopover
     private let menuBarChangeDot = MenuBarChangeDot(frame: .zero)
-    private var statusItem: NSStatusItem?
+    private(set) var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
+    private var localPopoverMonitor: Any?
+    private var globalPopoverMonitor: Any?
     private var subscriptions: Set<AnyCancellable> = []
     private let logger = Logger(subsystem: "dev.prbar.app", category: "application")
 
@@ -72,11 +76,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
         reviewLauncher: any ReviewLaunching = ReviewLauncher(),
         shortcutRegistrar: (any GlobalShortcutRegistering)? = nil, onboarding: OnboardingStore? = nil,
+        popover: NSPopover = NSPopover(),
+        openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        terminateApplication: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) },
         presentReviewError: @escaping @MainActor (ReviewLaunchError) -> Void = AppDelegate.showReviewError
     ) {
         self.store = store
         self.diagnostics = diagnostics
         self.reviewLauncher = reviewLauncher
+        self.openURL = openURL
+        self.terminateApplication = terminateApplication
+        self.popover = popover
         self.onboarding = onboarding ?? OnboardingStore(store: store, diagnostics: diagnostics.logger)
         self.presentReviewError = presentReviewError
         menuShortcut = GlobalShortcutStore(
@@ -104,7 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         button.addSubview(menuBarChangeDot)
         button.target = self
         button.action = #selector(togglePopover)
-        popover.behavior = .transient
+        // Transient dismissal can close on mouse-down before the button's toggle on mouse-up.
+        popover.behavior = .applicationDefined
         popover.animates = false
         popover.delegate = self
         let host = NSHostingController(
@@ -127,6 +138,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.diagnostics.logger.log(.info, .sleep) }
+            .store(in: &subscriptions)
+        // Menu-bar interaction can resign activity before the status button sends its action.
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                    self?.logger.error("An application activation notification did not include its application.")
+                    return
+                }
+                self?.handleApplicationActivation(
+                    processIdentifier: application.processIdentifier, isActive: application.isActive
+                )
+            }
             .store(in: &subscriptions)
         updateStatusItem()
         startMenuShortcut()
@@ -154,12 +178,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        closePopover()
         onboarding.pause()
         menuShortcut.stop()
         store.stop()
         diagnostics.recordShutdown()
         subscriptions.removeAll()
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
+    }
+
+    func handleApplicationActivation(processIdentifier: Int32, isActive: Bool) {
+        guard isActive, processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        closePopover()
     }
 
     func startMenuShortcut() {
@@ -179,16 +209,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             reportActionFailure("ReviewQ's menu-bar button is unavailable. Restart the app.")
             return
         }
-        if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
         NSApplication.shared.activate(ignoringOtherApps: true)
+        if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
         popover.contentViewController?.view.window?.makeKey()
         button.highlight(true)
+        startPopoverDismissalMonitoring()
     }
 
-    func closePopover() { popover.performClose(nil) }
+    func closePopover() {
+        stopPopoverDismissalMonitoring()
+        popover.performClose(nil)
+    }
 
     func popoverDidClose(_ notification: Notification) {
+        stopPopoverDismissalMonitoring()
         statusItem?.button?.highlight(false)
+    }
+
+    private func startPopoverDismissalMonitoring() {
+        guard popover.isShown, localPopoverMonitor == nil, globalPopoverMonitor == nil else { return }
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localPopoverMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, event.window !== self.popover.contentViewController?.view.window else { return }
+                guard !self.isStatusButtonEvent(event) else { return }
+                self.closePopover()
+            }
+            return event
+        }
+        globalPopoverMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleGlobalPopoverMouseDown(event) }
+        }
+        if localPopoverMonitor == nil || globalPopoverMonitor == nil {
+            reportActionFailure(
+                "Click-away dismissal is unavailable. Close the queue with its menu-bar icon or Command-Option-Q."
+            )
+        }
+    }
+
+    func handleGlobalPopoverMouseDown(_ event: NSEvent) {
+        guard !isStatusButtonEvent(event) else { return }
+        closePopover()
+    }
+
+    private func isStatusButtonEvent(_ event: NSEvent) -> Bool {
+        guard let button = statusItem?.button, let window = button.window else { return false }
+        let location = event.window.map { $0.convertPoint(toScreen: event.locationInWindow) } ?? event.locationInWindow
+        let frame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        return frame.contains(location)
+    }
+
+    private func stopPopoverDismissalMonitoring() {
+        if let localPopoverMonitor { NSEvent.removeMonitor(localPopoverMonitor) }
+        if let globalPopoverMonitor { NSEvent.removeMonitor(globalPopoverMonitor) }
+        localPopoverMonitor = nil
+        globalPopoverMonitor = nil
     }
 
     func showSettings() {
@@ -305,8 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         }
     }
 
+    func quit() { terminateApplication() }
+
     func open(_ url: URL) {
-        if NSWorkspace.shared.open(url) {
+        if openURL(url) {
             actionError = nil
             closePopover()
         } else {

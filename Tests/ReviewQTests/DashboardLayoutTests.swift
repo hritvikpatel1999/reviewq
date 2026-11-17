@@ -246,6 +246,7 @@ final class DashboardLayoutTests: XCTestCase {
             await capture(DashboardView(store: store, app: AppDelegate(store: store))), level: .fast
         )
         let peopleIndex = try XCTUnwrap(lines.firstIndex { $0.contains("People you follow") }, "\(lines)")
+        XCTAssertTrue(lines.joined(separator: " ").contains("2 pending reviews"), "\(lines)")
         for name in ["Alpha", "Beta"] {
             XCTAssertLessThan(try XCTUnwrap(lines.firstIndex { $0 == name }, "\(lines)"), peopleIndex)
         }
@@ -334,7 +335,9 @@ final class DashboardLayoutTests: XCTestCase {
         let view = DashboardView(store: store, app: AppDelegate(store: store)).frame(width: 440, height: 540)
         let image = try await capture(view)
         let text = try recognize(image).joined(separator: "\n")
-        XCTAssertEqual(text.components(separatedBy: "Quit").count - 1, 1, text)
+        XCTAssertFalse(text.contains("Quit"), "Quit uses a power icon instead of visible text.")
+        XCTAssertTrue(text.contains("Setup"), text)
+        XCTAssertTrue(text.contains("By: Hritvik Patel"), text)
         XCTAssertTrue(text.contains("Updated"))
         XCTAssertFalse(text.contains("Settings..."))
         XCTAssertFalse(text.contains("Azure DevOps"))

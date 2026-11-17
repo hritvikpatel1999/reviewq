@@ -176,7 +176,7 @@ final class AuthoredPullRequestsTests: XCTestCase {
         ], policies: [1: [policyEvaluationsResponse()]])
         let snapshot = try await load(settings, transport: transport)
         XCTAssertEqual(snapshot.pullRequests.count, 3)
-        XCTAssertEqual(snapshot.pendingReviewCount, 2)
+        XCTAssertEqual(snapshot.pendingReviewCount, 1)
         XCTAssertEqual(snapshot.pullRequests.filter { $0.authoredStatus != nil }.map(\.number), [1])
         XCTAssertEqual(snapshot.pullRequests.filter(\.isFollowedOnly).map(\.number), [2])
         let requests = await transport.requests

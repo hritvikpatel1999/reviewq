@@ -74,17 +74,21 @@ final class OnboardingWindowTests: XCTestCase {
         XCTAssertEqual(fixture.checks.configurations.count, 1, "Assistant detection and navigation must not fetch Azure DevOps.")
     }
 
-    func testDashboardSetupButtonStaysBesideUpdateTimeAndPreservesOpenSettings() async throws {
+    func testDashboardToolbarAndFooterPlacementPreserveActionsAndOpenSettings() async throws {
         for dark in [false, true] {
             let fixture = try OnboardingFixture()
             defer { fixture.close() }
             var configuration = ReviewConfiguration()
             configuration.sourceURLs = "https://dev.azure.com/example/Project"
             try fixture.store.save(configuration)
+            var openedURLs: [URL] = []
+            var quitRequests = 0
             let app = AppDelegate(
                 store: fixture.store,
                 diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
-                onboarding: fixture.model
+                onboarding: fixture.model,
+                openURL: { openedURLs.append($0); return openedURLs.count != 2 },
+                terminateApplication: { quitRequests += 1 }
             )
             let host = NSHostingView(rootView: DashboardView(store: fixture.store, app: app)
                 .environment(\.colorScheme, dark ? .dark : .light)
@@ -95,29 +99,50 @@ final class OnboardingWindowTests: XCTestCase {
             window.setContentSize(NSSize(width: 440, height: 540))
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             try await settle(host)
-            let unloaded = try text("Run Setup", in: capture(host))
-            XCTAssertGreaterThan(unloaded.minX, 0.7)
-            XCTAssertLessThan(unloaded.maxY, 0.1, "Setup must remain available before the first successful refresh.")
+            let unloadedToolbar = try toolbarTargets(in: host)
+            let unloadedCredit = try text("By: Hritvik Patel", in: capture(host))
+            XCTAssertGreaterThan(unloadedCredit.minX, 0.65)
+            XCTAssertLessThan(unloadedCredit.maxY, 0.1, "The credit replaces setup at the bottom-right.")
             await fixture.store.refresh()
             try await settle(host)
             let image = try capture(host)
-            let setup = try text("Run Setup", in: image)
+            let loadedToolbar = try toolbarTargets(in: host)
+            for (unloaded, loaded) in zip(unloadedToolbar, loadedToolbar) {
+                XCTAssertEqual(unloaded.x, loaded.x, accuracy: 1)
+            }
             let updated = try text("Updated", in: image, matchingPrefix: true)
-            XCTAssertLessThan(updated.maxX, setup.minX)
-            XCTAssertEqual(updated.midY, setup.midY, accuracy: 4 / host.bounds.height)
-            XCTAssertLessThan(setup.maxY, 0.1)
+            let credit = try text("By: Hritvik Patel", in: image)
+            XCTAssertLessThan(updated.maxX, credit.minX)
+            XCTAssertEqual(updated.midY, credit.midY, accuracy: 4 / host.bounds.height)
+            XCTAssertLessThan(credit.maxY, 0.1)
+            try press("By: Hritvik Patel", in: host)
+            XCTAssertEqual(openedURLs.map(\.absoluteString), ["https://github.com/hritvikpatel1999"])
+            XCTAssertNil(app.actionError)
             try exportPreview(image, name: "dashboard-\(dark ? "dark" : "light")")
 
-            app.showSettings()
+            try press("By: Hritvik Patel", in: host)
+            XCTAssertTrue(app.actionError?.contains("default browser") == true)
+            try press("By: Hritvik Patel", in: host)
+            XCTAssertNil(app.actionError)
+
+            try press(at: loadedToolbar[3], in: host)
+            XCTAssertEqual(quitRequests, 1, "The far-right power icon must invoke Quit.")
+            let refreshes = await fixture.loader.calls
+            try press(at: loadedToolbar[1], in: host)
+            try await settle(host)
+            let refreshed = await fixture.loader.calls
+            XCTAssertEqual(refreshed, refreshes + 1)
+
+            try press(at: loadedToolbar[2], in: host)
             let settings = try XCTUnwrap(NSApplication.shared.windows.first { $0.title == "ReviewQ Settings" && $0.isVisible })
             window.makeKeyAndOrderFront(nil)
-            try press("Run Setup", in: host)
+            try press("Setup", in: host)
             try await settle(host)
             XCTAssertNotNil(app.actionError)
             XCTAssertTrue(settings.isVisible)
             XCTAssertFalse(fixture.model.isActive)
             settings.close()
-            try press("Run Setup", in: host)
+            try press("Setup", in: host)
             try await settle(host)
             XCTAssertNil(app.actionError)
             XCTAssertTrue(fixture.model.isActive)
@@ -160,6 +185,7 @@ final class OnboardingWindowTests: XCTestCase {
         let image = try capture(host)
         XCTAssertEqual(store.snapshot, cached)
         XCTAssertTrue(store.isRefreshing)
+        let refreshingToolbar = try toolbarTargets(in: host)
         XCTAssertLessThan(try text("Updated", in: image, matchingPrefix: true).maxY, 0.1)
         XCTAssertGreaterThan(try text("Service", in: image).midY, 0.1)
         try exportPreview(image, name: "cached-startup-light")
@@ -169,6 +195,11 @@ final class OnboardingWindowTests: XCTestCase {
         await refresh.value
         XCTAssertEqual(store.snapshot, next)
         XCTAssertFalse(store.isRefreshing)
+        try await settle(host)
+        let refreshedToolbar = try toolbarTargets(in: host)
+        for (refreshing, refreshed) in zip(refreshingToolbar, refreshedToolbar) {
+            XCTAssertEqual(refreshing.x, refreshed.x, accuracy: 1)
+        }
     }
 
     func testSetupWindowReusesAndResumesWithoutLosingAnOpenSettingsWindow() async throws {
@@ -254,24 +285,43 @@ final class OnboardingWindowTests: XCTestCase {
         return try XCTUnwrap(bitmap.cgImage)
     }
 
+    private func toolbarTargets(in host: NSView) throws -> [NSPoint] {
+        let label = try text("Setup", in: capture(host))
+        XCTAssertGreaterThan(label.minY, 0.8, "Setup belongs in the header, not the footer.")
+        let setup = rect(label, in: host)
+        let quitX = host.bounds.maxX - 28
+        let settingsX = quitX - 45
+        let refreshX = settingsX - 34
+        XCTAssertLessThan(setup.maxX, refreshX - 12, "Setup must fit before Refresh without overlap.")
+        return [
+            NSPoint(x: setup.midX, y: setup.midY),
+            NSPoint(x: refreshX, y: setup.midY),
+            NSPoint(x: settingsX, y: setup.midY),
+            NSPoint(x: quitX, y: setup.midY)
+        ]
+    }
+
     private func text(_ title: String, in image: CGImage, matchingPrefix: Bool = false) throws -> CGRect {
-        let footerHeight = image.height / 5
-        let footer = try XCTUnwrap(image.cropping(to: CGRect(
-            x: 0, y: image.height - footerHeight, width: image.width, height: footerHeight
-        )))
-        let context = try XCTUnwrap(CGContext(
-            data: nil, width: footer.width * 2, height: footer.height * 2,
-            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ))
-        context.interpolationQuality = .high
-        context.draw(footer, in: CGRect(x: 0, y: 0, width: footer.width * 2, height: footer.height * 2))
-        let enlargedFooter = try XCTUnwrap(context.makeImage())
-        // Magnify small footer labels without invoking the host-dependent accurate model under Rosetta.
-        let regions = [(image, CGFloat(1)), (enlargedFooter, CGFloat(footerHeight) / CGFloat(image.height))]
+        let bandHeight = image.height / 5
+        let height = CGFloat(bandHeight) / CGFloat(image.height)
+        var regions: [(CGImage, CGFloat, CGFloat)] = [(image, 1, 0)]
+        // Magnify small header/footer labels without the host-dependent accurate model under Rosetta.
+        for header in [false, true] {
+            let band = try XCTUnwrap(image.cropping(to: CGRect(
+                x: 0, y: header ? 0 : image.height - bandHeight, width: image.width, height: bandHeight
+            )))
+            let context = try XCTUnwrap(CGContext(
+                data: nil, width: band.width * 2, height: band.height * 2,
+                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            context.interpolationQuality = .high
+            context.draw(band, in: CGRect(x: 0, y: 0, width: band.width * 2, height: band.height * 2))
+            regions.append((try XCTUnwrap(context.makeImage()), height, header ? 1 - height : 0))
+        }
         var visibleText: [String] = []
         var bounds: CGRect?
-        for (region, height) in regions {
+        for (region, height, offset) in regions {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .fast
             request.recognitionLanguages = ["en-US"]
@@ -283,7 +333,7 @@ final class OnboardingWindowTests: XCTestCase {
                 }
             }) {
                 bounds = CGRect(
-                    x: match.boundingBox.minX, y: match.boundingBox.minY * height,
+                    x: match.boundingBox.minX, y: offset + match.boundingBox.minY * height,
                     width: match.boundingBox.width, height: match.boundingBox.height * height
                 )
                 break
@@ -304,7 +354,11 @@ final class OnboardingWindowTests: XCTestCase {
     private func press(_ title: String, in host: NSView) throws {
         let bounds = try text(title, in: capture(host))
         let button = rect(bounds, in: host)
-        let location = host.convert(NSPoint(x: button.midX, y: button.midY), to: nil)
+        try press(at: NSPoint(x: button.midX, y: button.midY), in: host)
+    }
+
+    private func press(at point: NSPoint, in host: NSView) throws {
+        let location = host.convert(point, to: nil)
         let window = try XCTUnwrap(host.window)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             window.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(

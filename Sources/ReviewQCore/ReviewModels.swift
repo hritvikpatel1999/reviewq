@@ -209,7 +209,7 @@ public struct ReviewSnapshot: Codable, Equatable, Sendable {
     }
 
     public var pendingReviewCount: Int {
-        pullRequests.filter { $0.authoredStatus == nil }.count
+        pullRequests.filter { !$0.isFollowedOnly && $0.authoredStatus == nil }.count
     }
 }
 

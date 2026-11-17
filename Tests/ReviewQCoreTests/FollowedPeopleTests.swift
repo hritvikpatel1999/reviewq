@@ -38,6 +38,7 @@ final class FollowedPeopleTests: XCTestCase {
         ])
         let result = try await load(following(), transport: transport)
         XCTAssertEqual(result.pullRequests.count, 3)
+        XCTAssertEqual(result.pendingReviewCount, 1)
         let assigned = try XCTUnwrap(result.pullRequests.first { $0.number == 1 })
         XCTAssertFalse(assigned.isFollowedOnly)
         XCTAssertEqual(assigned.authorLabel, "Fixture author")
@@ -77,6 +78,7 @@ final class FollowedPeopleTests: XCTestCase {
         """)
         let result = try await load(settings, transport: transport)
         XCTAssertEqual(result.pullRequests.count, 3)
+        XCTAssertEqual(result.pendingReviewCount, 0)
         XCTAssertTrue(result.pullRequests.allSatisfy(\.isFollowedOnly))
         XCTAssertTrue(result.pullRequests.contains { $0.project == "Outside" })
         XCTAssertEqual(Set(result.pullRequests.map(\.organization)), ["example", "another"])
@@ -234,7 +236,7 @@ final class FollowedPeopleTests: XCTestCase {
         }
     }
 
-    func testCountsIncludeFollowedPRsFailuresPreserveBothSectionsAndOptingOutClearsThem() async throws {
+    func testCountsExcludeFollowedPRsFailuresPreserveBothSectionsAndOptingOutClearsThem() async throws {
         let transport = StubTransport([
             connectionResponse(), pullRequestsResponse([pullRequestJSON()]),
             identitiesResponse([followedIdentityJSON()]), projectsResponse(["Project"]),
@@ -256,10 +258,10 @@ final class FollowedPeopleTests: XCTestCase {
         await store.refresh()
         let successful = try XCTUnwrap(store.snapshot)
         XCTAssertEqual(successful.pullRequests.filter(\.isFollowedOnly).count, 1)
-        XCTAssertEqual(store.menuBarTitle, " 2")
+        XCTAssertEqual(store.menuBarTitle, " 1")
         await store.refresh()
         XCTAssertEqual(store.snapshot, successful)
-        XCTAssertEqual(store.menuBarTitle, " 2 !")
+        XCTAssertEqual(store.menuBarTitle, " 1 !")
         settings.followPeople = false
         try store.save(settings)
         XCTAssertNil(store.snapshot)
