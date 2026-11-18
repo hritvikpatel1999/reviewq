@@ -9,8 +9,13 @@ public final class ReviewStore: ObservableObject {
     @Published public private(set) var changes = ReviewChanges()
     @Published public private(set) var isRefreshing = false
     @Published public private(set) var errorMessage: String?
+    @Published public private(set) var archiveErrorMessage: String?
+    @Published private var archives: [String: Set<String>] = [:]
 
     public static let settingsKey = "reviewConfiguration"
+    static let archivesKey = "reviewArchivedPullRequests"
+    private static let maximumArchiveBytes = 512 * 1_024
+    private static let maximumArchivedRequests = 4_096
     private let loader: any ReviewLoading
     private let keychain: any PATStoring
     private let defaults: UserDefaults
@@ -21,6 +26,7 @@ public final class ReviewStore: ObservableObject {
     private var manualTask: Task<Void, Never>?
     private var generation = UUID()
     private var isStarted = false
+    private var previousSnapshot: ReviewSnapshot?
 
     public init(
         defaults: UserDefaults = .standard,
@@ -54,20 +60,126 @@ public final class ReviewStore: ObservableObject {
         }
         configuration = loaded
         errorMessage = initialError
+        restoreArchives()
         if initialError != nil {
             logger.error("Saved review settings are invalid. Check Settings.")
             diagnostics.log(.warning, .settingsFailed, operation: .settings, reason: initialReason)
         }
     }
 
+    private var archivedIDs: Set<String> {
+        guard let scope = snapshot?.identityScope else { return [] }
+        return archives[scope] ?? []
+    }
+
+    public var activePullRequests: [ReviewPullRequest] {
+        let hidden = archivedIDs
+        return (snapshot?.pullRequests ?? []).filter { !hidden.contains($0.id) }
+    }
+
+    public var archivedPullRequests: [ReviewPullRequest] {
+        let hidden = archivedIDs
+        return (snapshot?.pullRequests ?? []).filter { hidden.contains($0.id) }
+            .sorted(by: ReviewPullRequest.newestFirst)
+    }
+
+    public var pendingReviewCount: Int {
+        activePullRequests.filter { !$0.isFollowedOnly && $0.authoredStatus == nil }.count
+    }
+
     public var menuBarTitle: String {
         if errorMessage != nil {
-            if configuration.showCount, let snapshot { return " \(snapshot.pendingReviewCount) !" }
+            if configuration.showCount, snapshot != nil { return " \(pendingReviewCount) !" }
             return " !"
         }
         guard configuration.hasSources else { return "" }
-        guard let snapshot else { return " ..." }
-        return configuration.showCount ? " \(snapshot.pendingReviewCount)" : ""
+        guard snapshot != nil else { return " ..." }
+        return configuration.showCount ? " \(pendingReviewCount)" : ""
+    }
+
+    public func archive(_ request: ReviewPullRequest) {
+        setArchived(true, request: request)
+    }
+
+    public func restore(_ request: ReviewPullRequest) {
+        setArchived(false, request: request)
+    }
+
+    private func setArchived(_ archived: Bool, request: ReviewPullRequest) {
+        do {
+            guard let snapshot, let scope = snapshot.identityScope, Self.isArchiveScope(scope),
+                  snapshot.pullRequests.contains(where: { $0.id == request.id }),
+                  Self.isArchiveIdentifier(request.id) else {
+                throw ArchiveError.unavailable
+            }
+            var updated = archives
+            if archived {
+                updated[scope, default: []].insert(request.id)
+            } else {
+                updated[scope]?.remove(request.id)
+                if updated[scope]?.isEmpty == true { updated.removeValue(forKey: scope) }
+            }
+            guard updated.values.reduce(0, { $0 + $1.count }) <= Self.maximumArchivedRequests else {
+                throw ArchiveError.tooLarge
+            }
+            let data = try JSONEncoder().encode(ArchiveStorage(version: 1, scopes: updated))
+            guard data.count <= Self.maximumArchiveBytes else { throw ArchiveError.tooLarge }
+            defaults.set(data, forKey: Self.archivesKey)
+            archives = updated
+            updateChanges()
+            archiveErrorMessage = nil
+            diagnostics.log(.info, archived ? .reviewArchived : .reviewRestored, operation: .archives)
+        } catch {
+            archiveErrorMessage = error.localizedDescription
+            diagnostics.log(
+                .warning, .archiveChangeFailed, operation: .archives,
+                reason: (error as? ArchiveError)?.diagnosticReason ?? .storage
+            )
+            logger.warning("The local PR archive could not be changed. Check ReviewQ Diagnostics.")
+        }
+    }
+
+    private func restoreArchives() {
+        guard defaults.object(forKey: Self.archivesKey) != nil else { return }
+        do {
+            guard let data = defaults.data(forKey: Self.archivesKey), data.count <= Self.maximumArchiveBytes else {
+                throw ArchiveError.invalidData
+            }
+            let storage = try JSONDecoder().decode(ArchiveStorage.self, from: data)
+            guard storage.version == 1, storage.scopes.count <= Self.maximumArchivedRequests,
+                  storage.scopes.values.reduce(0, { $0 + $1.count }) <= Self.maximumArchivedRequests,
+                  storage.scopes.allSatisfy({ scope, identifiers in
+                      Self.isArchiveScope(scope) && !identifiers.isEmpty
+                          && identifiers.allSatisfy(Self.isArchiveIdentifier)
+                  }) else { throw ArchiveError.invalidData }
+            archives = storage.scopes
+        } catch {
+            defaults.removeObject(forKey: Self.archivesKey)
+            archiveErrorMessage = ArchiveError.invalidData.localizedDescription
+            diagnostics.log(.warning, .archiveStateInvalidated, operation: .archives, reason: .decoding)
+            logger.warning("Saved PR archive choices were invalid and have been cleared.")
+        }
+    }
+
+    private static func isArchiveScope(_ scope: String) -> Bool {
+        scope.utf8.count == 64 && scope.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    private static func isArchiveIdentifier(_ identifier: String) -> Bool {
+        let parts = identifier.split(separator: "/", omittingEmptySubsequences: false)
+        guard identifier.utf8.count <= 2_048, identifier == identifier.lowercased(),
+              !identifier.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              parts.count == 3, !parts[0].isEmpty, !parts[1].isEmpty,
+              let number = Int(parts[2]), number > 0 else { return false }
+        return parts[2] == String(number)
+    }
+
+    private func updateChanges() {
+        guard let snapshot else {
+            changes = ReviewChanges()
+            return
+        }
+        changes = ReviewChanges(previous: previousSnapshot, current: snapshot, excluding: archivedIDs)
     }
 
     public func start() {
@@ -132,8 +244,9 @@ public final class ReviewStore: ObservableObject {
                 )
                 return
             }
-            changes = ReviewChanges(previous: snapshot, current: result)
+            previousSnapshot = snapshot
             snapshot = result
+            updateChanges()
             errorMessage = nil
             if result.identityScope != nil { queueCache.save(result, configuration: currentConfiguration) }
             diagnostics.log(
@@ -168,6 +281,7 @@ public final class ReviewStore: ObservableObject {
         guard !Task.isCancelled, self.generation == generation else { return }
         if let snapshot, snapshot.identityScope != identityScope {
             self.snapshot = nil
+            previousSnapshot = nil
             changes = ReviewChanges()
             queueCache.clear()
         }
@@ -206,6 +320,7 @@ public final class ReviewStore: ObservableObject {
         self.configuration = configuration
         queueCache.clear()
         snapshot = verifiedSnapshot
+        previousSnapshot = nil
         if let verifiedSnapshot, verifiedSnapshot.identityScope != nil {
             queueCache.save(verifiedSnapshot, configuration: configuration)
         }
@@ -234,6 +349,7 @@ public final class ReviewStore: ObservableObject {
         if configuration.authentication == .personalAccessToken {
             cancelTasks()
             snapshot = nil
+            previousSnapshot = nil
             changes = ReviewChanges()
             queueCache.clear()
             errorMessage = ReviewQError.missingPAT.localizedDescription
@@ -266,6 +382,34 @@ public final class ReviewStore: ObservableObject {
                     return
                 }
                 await refresh()
+            }
+        }
+    }
+
+    private struct ArchiveStorage: Codable {
+        let version: Int
+        let scopes: [String: Set<String>]
+    }
+
+    private enum ArchiveError: LocalizedError {
+        case invalidData, unavailable, tooLarge
+
+        var diagnosticReason: DiagnosticReason {
+            switch self {
+            case .invalidData: .decoding
+            case .unavailable: .invalidConfiguration
+            case .tooLarge: .sizeLimit
+            }
+        }
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidData:
+                "Saved PR archive choices were invalid and have been cleared. Archive the PRs again."
+            case .unavailable:
+                "This PR is no longer in the authenticated queue. Refresh your reviews and try again."
+            case .tooLarge:
+                "The local PR archive is full. Restore some PRs before archiving more."
             }
         }
     }

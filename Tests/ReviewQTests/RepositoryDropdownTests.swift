@@ -175,8 +175,13 @@ final class RepositoryDropdownTests: XCTestCase {
         let rowHeight = (expandedHeight - collapsedHeight - 10 - 6) / 2
         let header = headerCenter(in: host, collapsedHeight: collapsedHeight)
         let direction: CGFloat = host.isFlipped ? 1 : -1
+        let rowTop = header.y + direction * (collapsedHeight / 2 - 12 + 10)
+        try click(NSPoint(x: host.bounds.midX + 175, y: rowTop + direction * 21), in: host, window: window)
+        try await settle(host)
+        XCTAssertEqual(state.edgeOpenedRequest, refreshed.first?.id)
+        XCTAssertNil(state.openedRequest, "The Edge shortcut must not invoke the default-browser action.")
         try click(NSPoint(
-            x: header.x, y: header.y + direction * (collapsedHeight / 2 - 12 + 10 + rowHeight / 2)
+            x: header.x, y: rowTop + direction * rowHeight / 2
         ), in: host, window: window)
         try await settle(host)
         XCTAssertEqual(state.openedRequest, refreshed.first?.id)
@@ -189,7 +194,7 @@ final class RepositoryDropdownTests: XCTestCase {
         XCTAssertEqual(host.intrinsicContentSize.height, collapsedHeight, accuracy: 1)
     }
 
-    func testAuthoredCardsHaveOnlyTheBrowserActionEvenWhileAnAIReviewIsLaunching() async throws {
+    func testAuthoredCardsHaveOnlyTheEdgeActionEvenWhileAnAIReviewIsLaunching() async throws {
         _ = NSApplication.shared
         let request = try request(
             number: 42, authoredStatus: AuthoredPullRequestStatus(activeCommentCount: 0, hasRequiredApprovals: true)
@@ -210,16 +215,17 @@ final class RepositoryDropdownTests: XCTestCase {
         let left = host.bounds.midX - 196
         try click(NSPoint(x: left + 371, y: top + direction * 21), in: host, window: window)
         try await settle(host)
-        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(edgeOpened, 1)
+        XCTAssertEqual(opened, 0)
         try click(NSPoint(x: left + 100, y: top + direction * 48), in: host, window: window)
         try await settle(host)
-        XCTAssertEqual(opened, 2)
+        XCTAssertEqual(opened, 1)
         for x in [315.0, 343.0] {
             try click(NSPoint(x: left + x, y: top + direction * 21), in: host, window: window)
         }
         try await settle(host)
         XCTAssertTrue(assistants.isEmpty)
-        XCTAssertEqual(edgeOpened, 0)
+        XCTAssertEqual(edgeOpened, 1)
         XCTAssertTrue(try hasGreenDot(in: host), "Browser actions must not clear the refresh-change dot.")
     }
 
@@ -423,6 +429,7 @@ final class RepositoryDropdownTests: XCTestCase {
 private final class DropdownState: ObservableObject {
     @Published var isExpanded = false
     var openedRequest: String?
+    var edgeOpenedRequest: String?
 }
 
 private struct DropdownHarness: View {
@@ -461,7 +468,8 @@ private struct AuthorDropdownHarness: View {
 
     var body: some View {
         AuthoredPullRequestsSection(
-            requests: requests, isExpanded: $state.isExpanded, open: { state.openedRequest = $0.id }
+            requests: requests, isExpanded: $state.isExpanded, open: { state.openedRequest = $0.id },
+            openInEdge: { state.edgeOpenedRequest = $0.id }
         )
         .frame(width: 416)
     }

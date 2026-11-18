@@ -25,6 +25,7 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case shortcutRegistered, shortcutPressed, shortcutRegistrationFailed, shortcutUnregistrationFailed
     case updateCheckStarted, updateCheckFinished, updateCheckFailed, updateCheckCancelled
     case updateCacheInvalidated, updateCacheWriteFailed
+    case reviewArchived, reviewRestored, archiveChangeFailed, archiveStateInvalidated
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
@@ -33,6 +34,7 @@ public enum DiagnosticOperation: String, Codable, Sendable {
     case scout, copilot
     case shortcut
     case appUpdates
+    case archives
 }
 
 public enum DiagnosticReason: String, Codable, Sendable {
