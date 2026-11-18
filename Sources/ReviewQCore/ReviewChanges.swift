@@ -13,10 +13,11 @@ public struct ReviewChanges: Equatable, Sendable {
         !pullRequestIDs.isEmpty || !repositoryIDs.isEmpty || followedPeople || authoredPullRequests
     }
 
-    init(previous: ReviewSnapshot?, current: ReviewSnapshot) {
+    init(previous: ReviewSnapshot?, current: ReviewSnapshot, excluding archivedIDs: Set<String> = []) {
         guard let previous, previous.identityScope == current.identityScope else { return }
-        var remaining = Dictionary(uniqueKeysWithValues: previous.pullRequests.map { ($0.id, $0) })
-        for request in current.pullRequests {
+        var remaining = Dictionary(uniqueKeysWithValues: previous.pullRequests
+            .filter { !archivedIDs.contains($0.id) }.map { ($0.id, $0) })
+        for request in current.pullRequests where !archivedIDs.contains(request.id) {
             let old = remaining.removeValue(forKey: request.id)
             guard old != request else { continue }
             pullRequestIDs.insert(request.id)

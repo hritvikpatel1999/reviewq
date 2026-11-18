@@ -125,15 +125,245 @@ final class ReviewStoreTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: ReviewQueueCache.settingsKey))
     }
 
-    private func cachedRequest(_ number: Int, title: String = "Original") throws -> ReviewPullRequest {
+    func testArchivingMovesAllQueueKindsWithoutChangingTheSnapshotCacheOrNetwork() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        var settings = configuration("https://dev.azure.com/example/Project\nhttps://dev.azure.com/another/Project")
+        settings.followPeople = true
+        settings.followedAuthorEmails = "alex@example.com"
+        settings.showAuthoredPullRequests = true
+        let assigned = try cachedRequest(1)
+        let followed = try cachedRequest(2, followed: true)
+        let authored = try cachedRequest(3, authored: true)
+        let otherRepository = try cachedRequest(1, repositoryID: "other-id")
+        let otherOrganization = try cachedRequest(1, organization: "another")
+        var snapshot = ReviewSnapshot(pullRequests: [assigned, followed, authored, otherRepository, otherOrganization])
+        snapshot.identityScope = String(repeating: "a", count: 64)
+        let loader = StubReviewLoader([])
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: loader)
+        try store.save(settings, verifiedSnapshot: snapshot)
+        let cached = defaults.data(forKey: ReviewQueueCache.settingsKey)
+        XCTAssertEqual(store.pendingReviewCount, 3)
+        for request in [assigned, followed, authored, assigned] { store.archive(request) }
+        XCTAssertNil(store.archiveErrorMessage)
+        XCTAssertEqual(Set(store.activePullRequests.map(\.id)), [otherRepository.id, otherOrganization.id])
+        XCTAssertEqual(Set(store.archivedPullRequests.map(\.id)), [assigned.id, followed.id, authored.id])
+        XCTAssertEqual(store.pendingReviewCount, 2)
+        XCTAssertEqual(store.menuBarTitle, " 2")
+        XCTAssertEqual(store.snapshot, snapshot)
+        XCTAssertEqual(defaults.data(forKey: ReviewQueueCache.settingsKey), cached)
+        store.restore(followed)
+        XCTAssertEqual(store.pendingReviewCount, 2)
+        store.restore(assigned)
+        XCTAssertEqual(store.pendingReviewCount, 3)
+        XCTAssertEqual(store.archivedPullRequests, [authored])
+        XCTAssertFalse(store.changes.hasChanges, "Local archive actions must not invent a server refresh change.")
+        let calls = await loader.calls
+        XCTAssertEqual(calls, 0)
+        let saved = try XCTUnwrap(defaults.data(forKey: ReviewStore.archivesKey))
+        let text = try XCTUnwrap(String(data: saved, encoding: .utf8))
+        XCTAssertFalse(text.contains("Original"))
+        XCTAssertFalse(text.contains("Fixture author"))
+        XCTAssertFalse(text.contains("https://"))
+    }
+
+    func testArchivesSurviveFailuresDisappearanceAndCachedRelaunchWithoutReturningToActiveLists() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let archived = try cachedRequest(1)
+        let active = try cachedRequest(2)
+        let scope = String(repeating: "a", count: 64)
+        var baseline = ReviewSnapshot(pullRequests: [archived, active])
+        baseline.identityScope = scope
+        var empty = ReviewSnapshot(pullRequests: [])
+        empty.identityScope = scope
+        let updated = try cachedRequest(1, title: "Updated while archived")
+        var returned = ReviewSnapshot(pullRequests: [updated, active])
+        returned.identityScope = scope
+        let loader = StubReviewLoader([
+            .failure(.http(503, "example/Project")), .success(empty), .success(returned)
+        ])
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: loader)
+        try store.save(configuration(), verifiedSnapshot: baseline)
+        store.archive(archived)
+        let choices = defaults.data(forKey: ReviewStore.archivesKey)
+        await store.refresh()
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertEqual(store.archivedPullRequests, [archived])
+        XCTAssertEqual(store.menuBarTitle, " 1 !")
+        await store.refresh()
+        XCTAssertTrue(store.archivedPullRequests.isEmpty)
+        XCTAssertEqual(defaults.data(forKey: ReviewStore.archivesKey), choices)
+        await store.refresh()
+        XCTAssertEqual(store.archivedPullRequests, [updated])
+        XCTAssertEqual(store.activePullRequests, [active])
+
+        let deferred = DeferredScopedReviewLoader(scope: scope)
+        let reopened = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: deferred)
+        XCTAssertTrue(reopened.archivedPullRequests.isEmpty, "Do not show another account's data before authentication.")
+        let refresh = Task { await reopened.refresh() }
+        await deferred.waitUntilStarted()
+        XCTAssertTrue(reopened.isRefreshing)
+        XCTAssertEqual(reopened.archivedPullRequests, [updated])
+        XCTAssertEqual(reopened.activePullRequests, [active])
+        XCTAssertEqual(reopened.menuBarTitle, " 1")
+        await deferred.finish(.failure(.http(503, "example/Project")))
+        await refresh.value
+        reopened.restore(updated)
+        XCTAssertTrue(reopened.archivedPullRequests.isEmpty)
+        XCTAssertEqual(Set(reopened.activePullRequests.map(\.id)), [updated.id, active.id])
+        XCTAssertEqual(reopened.menuBarTitle, " 2 !")
+    }
+
+    func testArchivesAreScopedToTheAuthenticatedQueueAndSurviveLocalPreferenceChanges() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let request = try cachedRequest(1)
+        var firstAccount = ReviewSnapshot(pullRequests: [request])
+        firstAccount.identityScope = String(repeating: "a", count: 64)
+        var otherAccount = firstAccount
+        otherAccount.identityScope = String(repeating: "b", count: 64)
+        let loader = StubReviewLoader([.success(otherAccount), .success(firstAccount)])
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: loader)
+        var settings = configuration()
+        settings.authentication = .personalAccessToken
+        try store.save(settings, verifiedSnapshot: firstAccount)
+        store.archive(request)
+        await store.refresh()
+        XCTAssertEqual(store.activePullRequests, [request])
+        XCTAssertTrue(store.archivedPullRequests.isEmpty)
+        XCTAssertFalse(store.changes.hasChanges)
+        await store.refresh()
+        XCTAssertTrue(store.activePullRequests.isEmpty)
+        XCTAssertEqual(store.archivedPullRequests, [request])
+        settings.refreshInterval = .fiveMinutes
+        try store.save(settings, verifiedSnapshot: firstAccount)
+        XCTAssertEqual(store.archivedPullRequests, [request])
+        let choices = defaults.data(forKey: ReviewStore.archivesKey)
+        try store.deleteSavedPAT()
+        XCTAssertTrue(store.archivedPullRequests.isEmpty)
+        XCTAssertTrue(store.activePullRequests.isEmpty)
+        XCTAssertEqual(defaults.data(forKey: ReviewStore.archivesKey), choices)
+    }
+
+    func testArchivedChangesDoNotLightActiveSectionsAndRestoringDoesNotInventChanges() async throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        var settings = configuration()
+        settings.followPeople = true
+        settings.followedAuthorEmails = "alex@example.com"
+        settings.showAuthoredPullRequests = true
+        let assigned = try cachedRequest(1)
+        let followed = try cachedRequest(2, followed: true)
+        let authored = try cachedRequest(3, authored: true)
+        let active = try cachedRequest(4)
+        let changedActive = try cachedRequest(4, title: "Active update")
+        var baseline = ReviewSnapshot(pullRequests: [assigned, followed, authored, active])
+        baseline.identityScope = String(repeating: "a", count: 64)
+        var archivedChanges = ReviewSnapshot(pullRequests: [
+            try cachedRequest(1, title: "Archived update"),
+            try cachedRequest(2, title: "Followed update", followed: true),
+            try cachedRequest(3, title: "Authored update", authored: true), active
+        ])
+        archivedChanges.identityScope = baseline.identityScope
+        var activeChanges = ReviewSnapshot(pullRequests: Array(archivedChanges.pullRequests.prefix(3)) + [changedActive])
+        activeChanges.identityScope = baseline.identityScope
+        let loader = StubReviewLoader([.success(archivedChanges), .success(activeChanges)])
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: loader)
+        try store.save(settings, verifiedSnapshot: baseline)
+        for request in [assigned, followed, authored] { store.archive(request) }
+        store.restore(assigned)
+        XCTAssertFalse(store.changes.hasChanges)
+        store.archive(assigned)
+        await store.refresh()
+        XCTAssertFalse(store.changes.hasChanges, "Changes to archived PRs must not light the active queue or menu bar.")
+        XCTAssertEqual(store.archivedPullRequests.first?.title, "Archived update")
+        store.restore(assigned)
+        XCTAssertEqual(store.changes.pullRequestIDs, [assigned.id], "Restoring may reveal a real change from the last refresh.")
+        store.archive(assigned)
+        XCTAssertFalse(store.changes.hasChanges)
+        await store.refresh()
+        XCTAssertEqual(store.changes.pullRequestIDs, [active.id])
+        XCTAssertEqual(store.changes.repositoryIDs, [active.groupID])
+        XCTAssertFalse(store.changes.followedPeople)
+        XCTAssertFalse(store.changes.authoredPullRequests)
+        store.restore(followed)
+        XCTAssertEqual(store.changes.pullRequestIDs, [active.id])
+    }
+
+    func testFullArchiveRefusesAnAdditionalPRWithoutHidingItAndCanRecoverAfterRestore() throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let scope = String(repeating: "a", count: 64)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "version": 1, "scopes": [scope: (1...4_096).map { "example/service-id/\($0)" }]
+        ])
+        defaults.set(data, forKey: ReviewStore.archivesKey)
+        let archived = try cachedRequest(4_096)
+        let additional = try cachedRequest(4_097)
+        var snapshot = ReviewSnapshot(pullRequests: [archived, additional])
+        snapshot.identityScope = scope
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]))
+        try store.save(configuration(), verifiedSnapshot: snapshot)
+        store.archive(additional)
+        XCTAssertNotNil(store.archiveErrorMessage)
+        XCTAssertEqual(store.activePullRequests, [additional])
+        XCTAssertEqual(store.archivedPullRequests, [archived])
+        XCTAssertEqual(defaults.data(forKey: ReviewStore.archivesKey), data)
+        store.restore(archived)
+        store.archive(additional)
+        XCTAssertNil(store.archiveErrorMessage)
+        XCTAssertEqual(store.activePullRequests, [archived])
+        XCTAssertEqual(store.archivedPullRequests, [additional])
+    }
+
+    func testInvalidArchiveStateAndUnavailableActionsAreVisibleAndLogNoPRDetails() throws {
+        let (defaults, name) = try preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ReviewQ-archive-tests-\(UUID())")
+        defer {
+            do { try FileManager.default.removeItem(at: directory) } catch { XCTFail("Could not remove test logs: \(error)") }
+        }
+        let diagnostics = DiagnosticLogger(directory: directory)
+        let invalid = try JSONSerialization.data(withJSONObject: [
+            "version": 1, "scopes": [String(repeating: "a", count: 64): ["PRIVATE_ARCHIVE_PAYLOAD"]]
+        ])
+        for data in [Data("PRIVATE_ARCHIVE_PAYLOAD".utf8), invalid, Data(repeating: 0, count: 512 * 1_024 + 1)] {
+            defaults.set(data, forKey: ReviewStore.archivesKey)
+            let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]), diagnostics: diagnostics)
+            XCTAssertNotNil(store.archiveErrorMessage)
+            XCTAssertNil(defaults.object(forKey: ReviewStore.archivesKey))
+        }
+        let store = ReviewStore(defaults: defaults, keychain: StubPATStore(), loader: StubReviewLoader([]), diagnostics: diagnostics)
+        let request = try cachedRequest(1, title: "PRIVATE_ARCHIVE_TITLE")
+        try store.save(configuration(), verifiedSnapshot: ReviewSnapshot(pullRequests: [request]))
+        store.archive(request)
+        XCTAssertNotNil(store.archiveErrorMessage)
+        XCTAssertEqual(store.activePullRequests, [request])
+        XCTAssertNil(defaults.object(forKey: ReviewStore.archivesKey))
+        XCTAssertNil(store.errorMessage, "A local action failure is not an Azure DevOps refresh error.")
+        diagnostics.flush()
+        let log = try String(contentsOf: directory.appendingPathComponent("warnings-errors.log"), encoding: .utf8)
+        XCTAssertTrue(log.contains("archiveStateInvalidated"))
+        XCTAssertTrue(log.contains("archiveChangeFailed"))
+        XCTAssertFalse(log.contains("PRIVATE_ARCHIVE"))
+        XCTAssertFalse(log.contains(request.url.absoluteString))
+    }
+
+    private func cachedRequest(
+        _ number: Int, title: String = "Original", organization: String = "example",
+        repositoryID: String = "service-id", followed: Bool = false, authored: Bool = false
+    ) throws -> ReviewPullRequest {
         var request = ReviewPullRequest(
-            number: number, title: title, author: "Fixture author", organization: "example",
-            project: "Project", repository: "Service", repositoryID: "service-id", createdAt: .distantPast,
+            number: number, title: title, author: "Fixture author", organization: organization,
+            project: "Project", repository: "Service", repositoryID: repositoryID, createdAt: .distantPast,
             url: try AzureDevOpsURL.make(
-                organization: "example", path: ["Project", "_git", "service-id", "pullrequest", String(number)]
+                organization: organization, path: ["Project", "_git", repositoryID, "pullrequest", String(number)]
             ),
             isRequired: true, isDraft: false, reviewStage: .commented,
-            commentResolution: ReviewCommentResolution(resolvedCount: 2, openCount: 1)
+            commentResolution: ReviewCommentResolution(resolvedCount: 2, openCount: 1),
+            isFollowedOnly: followed,
+            authoredStatus: authored ? AuthoredPullRequestStatus(activeCommentCount: 0, hasRequiredApprovals: false) : nil
         )
         request.changeFingerprint = Data(repeating: 1, count: 32)
         return request

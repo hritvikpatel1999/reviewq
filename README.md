@@ -20,7 +20,8 @@ future version, not included in this release.
   and comment-resolution labels based on your recorded review history.
 - Multiple Azure DevOps organizations and projects.
 - An opt-in, collapsible **People you follow** queue for PRs by configured authors.
-- An opt-in, collapsible **I'm the Author** section with active discussion counts, approval readiness, and browser-only links.
+- An opt-in, collapsible **I'm the Author** section with active discussion counts, approval readiness, and Edge shortcuts.
+- Local PR archiving with a separate **Archives** section and one-click Restore.
 - Persistent, account-scoped user/author identity caches with a manual re-lookup control.
 - Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
 - Restore the last successful queue while a startup refresh loads fresh data for the same account.
@@ -323,15 +324,42 @@ version/build, macOS minimum, icon-resource, compiled-UUID, and checksum verific
 
 The [version 3.1.1 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.1.1) remains available.
 
-## Download version 3.2
+## What's new in version 3.3
 
-Download from the [ReviewQ v3.2.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.2.0).
+Version **3.3.0 / build 10** adds local PR archiving:
+
+- An **Archive** icon on assigned, followed, and authored PR cards moves the PR out of active lists,
+  pending-review counts, and active change indicators.
+- A collapsed **Archives** section below the other queues lists currently fetched archived PRs,
+  newest first, with repository context, a browser link, and **Restore**.
+- Account/source-scoped choices survive refreshes and restarts without changing Azure DevOps or
+  making additional requests. This is not a historical archive of merged or otherwise absent PRs.
+- Colored Archive/Restore symbols sit on white rounded backgrounds, sized alongside the existing
+  action icons. **I'm the Author** now has the same Edge shortcut as review cards; clicking the
+  rest of a card still opens your default browser.
+
+Existing credentials, settings, raw startup cache, update notifications, and queue toggling remain
+intact. See [Archives](#archives) for persistence boundaries and failure handling.
+
+Release validation ran **259 tests per architecture** with the same five documented OCR exclusions.
+**256 passed on Apple Silicon and 256 on Intel/Rosetta**. Two unchanged clipboard tests and one
+unchanged OCR layout test failed identically on the untouched v3.2.0 baseline; details are in the
+[release context](docs/pr-context/release-reviewq-v3.3.0.md#how-was-this-validated).
+All nine new archive tests and the authored Edge regressions passed on both architectures.
+Both packaged apps and extracted ZIP payloads passed signature, architecture, metadata, icon,
+compiled-UUID, deployment-target, and checksum checks.
+
+The [version 3.2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.2.0) remains available.
+
+## Download version 3.3
+
+Download from the [ReviewQ v3.3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.3.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-3.2.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-3.2.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-3.3.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-3.3.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -345,7 +373,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 3.2 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 3.3 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -457,10 +485,36 @@ Repositories start collapsed. Multiple repositories can be expanded at once, and
 are retained while the app is running, including across refreshes and closing/reopening the
 popover. Collapsing a repository does not change the pending count or review filters.
 
+## Archives
+
+Click the **archive-box icon** on a PR card to move it to the collapsible **Archives** section
+below all other queues. It disappears immediately from repository reviews, **People you follow**,
+and **I'm the Author**, as applicable. Archived assigned PRs no longer increase the menu-bar or
+header pending-review count; changes confined to archived PRs do not light the active queue's dots.
+The Archives section appears when the current queue contains at least one archived PR and starts
+collapsed. Cards are sorted by creation time, newest first, and include the repository name.
+
+Expand **Archives** to open a PR in your browser or click its **Restore** arrow to return it to its
+normal active list. Archive and Restore act only in ReviewQ: they do not vote, abandon, complete,
+or otherwise change the PR in Azure DevOps. They require no network request or additional permission.
+
+Choices persist across refreshes and restarts in the local `reviewArchivedPullRequests` preference.
+Only canonical PR identifiers and the existing hashed authenticated/source scope are saved, not
+titles, author names, credentials, or extra copies of PR content. The same account, sources, and
+following scope recover the same choices; a different account or changed source/following scope
+uses separate choices. Ordinary display preferences do not clear them.
+
+This is not a historical archive of closed PRs: only PRs returned by the current configured sources
+and filters are displayed. Their metadata continues to refresh normally. If a PR leaves the queue
+(for example, after merging or casting a vote), its saved archive choice remains, so it stays hidden
+from active lists if it later returns in the same scope. The raw startup cache and network-change
+baseline remain intact. Invalid archive preferences or storage-limit failures are shown explicitly
+and recorded under the `archives` Diagnostics operation without PR details.
+
 ## Review with Scout or Copilot
 
 These actions are included in version 2; the v1.0.0 downloads do not include them.
-Each PR now has three small icon buttons: Microsoft Edge, Scout, and Copilot. Hovering an enabled
+Active review cards keep Microsoft Edge, Scout, and Copilot shortcuts beside the Archive icon. Hovering an enabled
 icon enlarges it by 15% and shows a rounded highlight without moving the row or adding height.
 Hover animation respects Reduce Motion. The Edge shortcut opens explicitly in Edge; clicking
 the rest of the row still uses your default browser. Edge must be installed for its shortcut.
@@ -677,8 +731,9 @@ draft preference applies; completed and abandoned PRs are excluded.
   do not block this label. With no approval requirements, no approvals are needed.
 - **Build status is not checked.** Other completion requirements such as conflicts, work-item links,
   and external status checks are not part of this label either; it is not a guarantee of mergeability.
-- Cards show the repository beside the author and have **only a browser button**. Clicking the card
-  also opens the PR. No merge, Edge, Scout, or Copilot actions are added to this section.
+- Cards show the repository beside the author and have an **Edge shortcut** beside **Archive**.
+  The Edge icon opens the PR explicitly in Microsoft Edge; clicking the card still uses your default
+  browser. Edge must be installed for its shortcut. No merge, Scout, or Copilot actions are added here.
 
 Authored PRs are not duplicated in the other queues and do not increase the menu-bar or header's
 pending-review count. The section has its own count. It adds no requests while disabled. When enabled,

@@ -73,6 +73,48 @@ final class GlobalShortcutTests: XCTestCase {
         }
     }
 
+    func testStatusCountAndTooltipFollowArchiveAndRestoreWithoutRefreshingPRs() async throws {
+        let application = NSApplication.shared
+        let previousPolicy = application.activationPolicy()
+        application.setActivationPolicy(.accessory)
+        defer { application.setActivationPolicy(previousPolicy) }
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        fixture.defaults.set(true, forKey: OnboardingStore.completedKey)
+        var settings = ReviewConfiguration()
+        settings.sourceURLs = "https://dev.azure.com/example/Project"
+        try fixture.store.save(settings)
+        let app = AppDelegate(
+            store: fixture.store, diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
+            shortcutRegistrar: ShortcutRegistrarFake(), onboarding: fixture.model, updates: fixture.updates
+        )
+        defer { app.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        await fixture.loader.waitUntilLoaded()
+        try await Task.sleep(for: .milliseconds(50))
+        let request = ReviewPullRequest(
+            number: 1, title: "Archive count fixture", author: "Fixture author", organization: "example",
+            project: "Project", repository: "Service", repositoryID: "service-id", createdAt: .now,
+            url: try AzureDevOpsURL.make(
+                organization: "example", path: ["Project", "_git", "service-id", "pullrequest", "1"]
+            ),
+            isRequired: true, isDraft: false, reviewStage: .firstReview
+        )
+        var snapshot = ReviewSnapshot(pullRequests: [request])
+        snapshot.identityScope = String(repeating: "a", count: 64)
+        try fixture.store.save(settings, verifiedSnapshot: snapshot)
+        let button = try XCTUnwrap(app.statusItem?.button)
+        for (archived, count) in [(true, 0), (false, 1)] {
+            if archived { fixture.store.archive(request) } else { fixture.store.restore(request) }
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(button.title, " \(count)")
+            XCTAssertEqual(button.toolTip, "ReviewQ - \(count) pull requests need your review")
+            XCTAssertEqual(button.accessibilityLabel(), button.toolTip)
+        }
+        let calls = await fixture.loader.calls
+        XCTAssertEqual(calls, 1, "Local archive changes must not refresh PRs.")
+    }
+
     func testStatusClicksAndShortcutReleasesAlwaysToggleTheSamePopover() async throws {
         let application = NSApplication.shared
         let previousPolicy = application.activationPolicy()

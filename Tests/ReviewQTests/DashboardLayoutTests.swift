@@ -33,7 +33,8 @@ final class DashboardLayoutTests: XCTestCase {
             },
             { expanded, changes in
                 AnyView(AuthoredPullRequestsSection(
-                    requests: [authored], isExpanded: .constant(expanded), open: { _ in }, changes: changes
+                    requests: [authored], isExpanded: .constant(expanded),
+                    open: { _ in }, openInEdge: { _ in }, changes: changes
                 ))
             }
         ]
@@ -186,7 +187,9 @@ final class DashboardLayoutTests: XCTestCase {
         XCTAssertTrue(lines.joined().contains("I'm the Author"), "\(lines)")
         XCTAssertFalse(lines.joined().contains("caught up"), "\(lines)")
         let expanded = try recognize(render(
-            AuthoredPullRequestsSection(requests: [], isExpanded: .constant(true), open: { _ in })
+            AuthoredPullRequestsSection(
+                requests: [], isExpanded: .constant(true), open: { _ in }, openInEdge: { _ in }
+            )
                 .frame(width: 416)
         ), level: .fast)
         XCTAssertTrue(expanded.joined().localizedCaseInsensitiveContains("No active PRs authored by you"), "\(expanded)")

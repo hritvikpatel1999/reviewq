@@ -9,6 +9,7 @@ struct DashboardView: View {
     @State private var expandedRepositoryIDs: Set<String> = []
     @State private var isFollowedPeopleExpanded = false
     @State private var isAuthoredExpanded = false
+    @State private var isArchiveExpanded = false
 
     init(store: ReviewStore, app: AppDelegate) {
         self.store = store
@@ -17,15 +18,15 @@ struct DashboardView: View {
     }
 
     private var groups: [RepositoryGroup] {
-        RepositoryGroup.grouping(store.snapshot?.pullRequests ?? [])
+        RepositoryGroup.grouping(store.activePullRequests)
     }
 
     private var followedRequests: [ReviewPullRequest] {
-        (store.snapshot?.pullRequests ?? []).filter(\.isFollowedOnly).sorted(by: ReviewPullRequest.newestFirst)
+        store.activePullRequests.filter(\.isFollowedOnly).sorted(by: ReviewPullRequest.newestFirst)
     }
 
     private var authoredRequests: [ReviewPullRequest] {
-        (store.snapshot?.pullRequests ?? []).filter { $0.authoredStatus != nil }
+        store.activePullRequests.filter { $0.authoredStatus != nil }
             .sorted(by: ReviewPullRequest.newestFirst)
     }
 
@@ -41,6 +42,13 @@ struct DashboardView: View {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color.red.opacity(0.06))
+            }
+            if let error = store.archiveErrorMessage {
+                Label(error, systemImage: "archivebox")
+                    .font(.caption).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                     .background(Color.red.opacity(0.06))
@@ -99,8 +107,8 @@ struct DashboardView: View {
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text("ReviewQ").font(.headline)
-                if let snapshot = store.snapshot {
-                    Text("\(snapshot.pendingReviewCount) pending reviews").font(.caption).foregroundStyle(.secondary)
+                if store.snapshot != nil {
+                    Text("\(store.pendingReviewCount) pending reviews").font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("Your Azure DevOps review queue").font(.caption).foregroundStyle(.secondary)
                 }
@@ -173,7 +181,8 @@ struct DashboardView: View {
                 }
             }
             .padding(24)
-        } else if groups.isEmpty && !store.configuration.followPeople && !store.configuration.showAuthoredPullRequests {
+        } else if groups.isEmpty && !store.configuration.followPeople
+                    && !store.configuration.showAuthoredPullRequests && store.archivedPullRequests.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: store.errorMessage == nil ? "checkmark.circle" : "clock.badge.exclamationmark")
                     .font(.system(size: 42))
@@ -208,7 +217,8 @@ struct DashboardView: View {
                                 Task { await app.review(request, with: assistant) }
                             },
                             isLaunchingReview: app.isLaunchingReview,
-                            changes: store.changes
+                            changes: store.changes,
+                            archive: store.archive
                         )
                     }
                     if store.configuration.followPeople {
@@ -221,14 +231,23 @@ struct DashboardView: View {
                                 Task { await app.review(request, with: assistant) }
                             },
                             isLaunchingReview: app.isLaunchingReview,
-                            changes: store.changes
+                            changes: store.changes,
+                            archive: store.archive
                         )
                     }
                     if store.configuration.showAuthoredPullRequests {
                         AuthoredPullRequestsSection(
                             requests: authoredRequests, isExpanded: $isAuthoredExpanded,
                             open: { app.open($0.url) },
-                            changes: store.changes
+                            openInEdge: { app.openInEdge($0.url) },
+                            changes: store.changes,
+                            archive: store.archive
+                        )
+                    }
+                    if !store.archivedPullRequests.isEmpty {
+                        ArchivedPullRequestsSection(
+                            requests: store.archivedPullRequests, isExpanded: $isArchiveExpanded,
+                            open: { app.open($0.url) }, restore: store.restore
                         )
                     }
                 }
@@ -281,7 +300,9 @@ struct AuthoredPullRequestsSection: View {
     let requests: [ReviewPullRequest]
     @Binding var isExpanded: Bool
     let open: (ReviewPullRequest) -> Void
+    let openInEdge: (ReviewPullRequest) -> Void
     var changes = ReviewChanges()
+    var archive: ((ReviewPullRequest) -> Void)? = nil
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -293,7 +314,9 @@ struct AuthoredPullRequestsSection: View {
                     ForEach(requests) { request in
                         PullRequestRow(
                             request: request, open: { open(request) },
-                            isChanged: changes.pullRequestIDs.contains(request.id)
+                            openInEdge: { openInEdge(request) },
+                            isChanged: changes.pullRequestIDs.contains(request.id),
+                            archiveAction: archive.map { archive in .archive { archive(request) } }
                         )
                     }
                 }
@@ -331,6 +354,7 @@ struct FollowedPeopleSection: View {
     let review: (ReviewPullRequest, ReviewAssistant) -> Void
     let isLaunchingReview: Bool
     var changes = ReviewChanges()
+    var archive: ((ReviewPullRequest) -> Void)? = nil
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -344,7 +368,8 @@ struct FollowedPeopleSection: View {
                             request: request, open: { open(request) },
                             openInEdge: { openInEdge(request) },
                             review: { review(request, $0) }, isLaunchingReview: isLaunchingReview,
-                            isChanged: changes.pullRequestIDs.contains(request.id)
+                            isChanged: changes.pullRequestIDs.contains(request.id),
+                            archiveAction: archive.map { archive in .archive { archive(request) } }
                         )
                     }
                 }
@@ -382,6 +407,7 @@ struct RepositoryDropdown: View {
     let review: (ReviewPullRequest, ReviewAssistant) -> Void
     let isLaunchingReview: Bool
     var changes = ReviewChanges()
+    var archive: ((ReviewPullRequest) -> Void)? = nil
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
@@ -391,7 +417,8 @@ struct RepositoryDropdown: View {
                         request: request, open: { open(request) },
                         openInEdge: { openInEdge(request) },
                         review: { review(request, $0) }, isLaunchingReview: isLaunchingReview,
-                        isChanged: changes.pullRequestIDs.contains(request.id)
+                        isChanged: changes.pullRequestIDs.contains(request.id),
+                        archiveAction: archive.map { archive in .archive { archive(request) } }
                     )
                 }
             }
@@ -423,6 +450,45 @@ struct RepositoryDropdown: View {
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityIdentifier("repository-dropdown-\(group.id)")
+    }
+}
+
+struct ArchivedPullRequestsSection: View {
+    let requests: [ReviewPullRequest]
+    @Binding var isExpanded: Bool
+    let open: (ReviewPullRequest) -> Void
+    let restore: (ReviewPullRequest) -> Void
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 6) {
+                ForEach(requests) { request in
+                    PullRequestRow(
+                        request: request, open: { open(request) },
+                        archiveAction: .restore { restore(request) }
+                    )
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 10) {
+                Label("Archives", systemImage: "archivebox")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                Text("\(requests.count)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .accessibilityLabel("\(requests.count) archived pull requests")
+            }
+        }
+        .disclosureGroupStyle(ReviewDisclosureStyle(
+            accessibilityHint: "Show or hide archived pull requests. Restore a PR to return it to its active list."
+        ))
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("archived-pull-requests-section")
     }
 }
 
@@ -471,29 +537,65 @@ struct PullRequestRow: View {
     let open: () -> Void
     let isChanged: Bool
     private let actions: Actions
+    private let archiveAction: ArchiveAction?
     @State private var isHovered = false
 
     private enum Actions {
         case browser
+        case edge(() -> Void)
         case review(openInEdge: () -> Void, review: (ReviewAssistant) -> Void, isLaunching: Bool)
     }
 
-    init(request: ReviewPullRequest, open: @escaping () -> Void, isChanged: Bool = false) {
-        self.request = request
-        self.open = open
-        self.isChanged = isChanged
-        actions = .browser
+    enum ArchiveAction {
+        case archive(() -> Void), restore(() -> Void)
+
+        var isRestoring: Bool {
+            if case .restore = self { return true }
+            return false
+        }
+
+        func perform() {
+            switch self {
+            case .archive(let action), .restore(let action): action()
+            }
+        }
+    }
+
+    private var authorLabel: String {
+        archiveAction?.isRestoring == true ? "\(request.author) in \(request.repository)" : request.authorLabel
+    }
+
+    private var actionSpace: CGFloat {
+        let count = switch actions {
+        case .browser, .edge: 1
+        case .review: 3
+        }
+        return CGFloat((count + (archiveAction == nil ? 0 : 1)) * 28)
     }
 
     init(
-        request: ReviewPullRequest, open: @escaping () -> Void, openInEdge: @escaping () -> Void,
-        review: @escaping (ReviewAssistant) -> Void, isLaunchingReview: Bool, isChanged: Bool = false
+        request: ReviewPullRequest, open: @escaping () -> Void, openInEdge: (() -> Void)? = nil,
+        isChanged: Bool = false,
+        archiveAction: ArchiveAction? = nil
     ) {
         self.request = request
         self.open = open
         self.isChanged = isChanged
+        self.archiveAction = archiveAction
+        actions = openInEdge.map { .edge($0) } ?? .browser
+    }
+
+    init(
+        request: ReviewPullRequest, open: @escaping () -> Void, openInEdge: @escaping () -> Void,
+        review: @escaping (ReviewAssistant) -> Void, isLaunchingReview: Bool, isChanged: Bool = false,
+        archiveAction: ArchiveAction? = nil
+    ) {
+        self.request = request
+        self.open = open
+        self.isChanged = isChanged
+        self.archiveAction = archiveAction
         actions = request.authoredStatus == nil
-            ? .review(openInEdge: openInEdge, review: review, isLaunching: isLaunchingReview) : .browser
+            ? .review(openInEdge: openInEdge, review: review, isLaunching: isLaunchingReview) : .edge(openInEdge)
     }
 
     var body: some View {
@@ -524,13 +626,13 @@ struct PullRequestRow: View {
                                 .lineLimit(1).minimumScaleFactor(0.85)
                                 .help(request.reviewStageExplanation)
                         }
-                        Spacer(minLength: request.authoredStatus == nil ? 84 : 28)
+                        Spacer(minLength: actionSpace)
                     }
                     .frame(height: 22)
                     Text(request.title).font(.system(size: 13, weight: .medium)).lineLimit(2)
                         .multilineTextAlignment(.leading)
                     HStack {
-                        Text(request.authorLabel).lineLimit(1).help(request.authorLabel)
+                        Text(authorLabel).lineLimit(1).help(authorLabel)
                         Spacer()
                         Text(request.createdAt, style: .relative)
                     }
@@ -542,7 +644,7 @@ struct PullRequestRow: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(
-                "Pull request: \(request.title), by \(request.authorLabel)"
+                "Pull request: \(request.title), by \(authorLabel)"
                     + (request.authoredStatus == nil
                        ? ", \(request.reviewStageLabel)" : request.authoredStatusLabel.map { ", \($0)" } ?? "")
                     + (isChanged ? ", changed since previous successful refresh" : "")
@@ -550,6 +652,21 @@ struct PullRequestRow: View {
             .help("Open pull request in your browser")
 
             HStack(spacing: 6) {
+                if let archiveAction {
+                    Button(action: archiveAction.perform) {
+                        Image(systemName: archiveAction.isRestoring ? "arrow.uturn.backward" : "archivebox.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(archiveAction.isRestoring ? Color.blue.gradient : Color.orange.gradient)
+                            .frame(width: 18, height: 18)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 4))
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("\(archiveAction.isRestoring ? "Restore" : "Archive") pull request: \(request.title)")
+                    .accessibilityIdentifier("\(archiveAction.isRestoring ? "restore" : "archive")-pr-\(request.id)")
+                    .help(archiveAction.isRestoring
+                          ? "Restore PR to its active list"
+                          : "Move PR to Archives in ReviewQ only")
+                }
                 switch actions {
                 case .browser:
                     Button(action: open) {
@@ -558,12 +675,10 @@ struct PullRequestRow: View {
                     }
                     .accessibilityLabel("Open in browser: \(request.title)")
                     .help("Open PR in your browser")
+                case .edge(let openInEdge):
+                    edgeButton(action: openInEdge)
                 case .review(let openInEdge, let review, let isLaunching):
-                    Button(action: openInEdge) {
-                        EdgeBrowserIcon().frame(width: 22, height: 22).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Open in Microsoft Edge: \(request.title)")
-                    .help("Open PR in Microsoft Edge")
+                    edgeButton(action: openInEdge)
                     ForEach(ReviewAssistant.allCases, id: \.self) { assistant in
                         Button { review(assistant) } label: {
                             ReviewAssistantIcon(assistant: assistant)
@@ -583,6 +698,14 @@ struct PullRequestRow: View {
             in: RoundedRectangle(cornerRadius: 9)
         )
         .onHover { isHovered = $0 }
+    }
+
+    private func edgeButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            EdgeBrowserIcon().frame(width: 22, height: 22).contentShape(Rectangle())
+        }
+        .accessibilityLabel("Open in Microsoft Edge: \(request.title)")
+        .help("Open PR in Microsoft Edge")
     }
 }
 

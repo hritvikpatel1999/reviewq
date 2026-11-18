@@ -253,6 +253,126 @@ final class OnboardingWindowTests: XCTestCase {
         XCTAssertNil(fixture.store.snapshot, "Checking app updates must not fetch PRs.")
     }
 
+    func testNativeArchiveAndRestoreMoveCardsOutOfEveryActiveQueueInBothAppearances() async throws {
+        for dark in [false, true] {
+            for (section, followed, authored) in [
+                ("Service", false, false), ("People you follow", true, false), ("I'm the Author", false, true)
+            ] {
+                let fixture = try OnboardingFixture()
+                defer { fixture.close() }
+                var settings = ReviewConfiguration()
+                settings.sourceURLs = "https://dev.azure.com/example/Project"
+                settings.followPeople = followed
+                settings.followedAuthorEmails = followed ? "alex@example.com" : ""
+                settings.showAuthoredPullRequests = authored
+                let request = try archiveRequest(1, followed: followed, authored: authored)
+                var snapshot = ReviewSnapshot(pullRequests: [request])
+                snapshot.identityScope = String(repeating: "a", count: 64)
+                try fixture.store.save(settings, verifiedSnapshot: snapshot)
+                var openedURLs: [URL] = []
+                let app = AppDelegate(
+                    store: fixture.store, onboarding: fixture.model, updates: fixture.updates,
+                    openURL: { openedURLs.append($0); return true }
+                )
+                let host = NSHostingView(rootView: DashboardView(store: fixture.store, app: app)
+                    .environment(\.colorScheme, dark ? .dark : .light)
+                    .environment(\.locale, Locale(identifier: "en_US"))
+                )
+                let window = makeWindow(host)
+                defer { window.close() }
+                window.setContentSize(NSSize(width: 440, height: 540))
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                try await settle(host)
+                try press(section, in: host, matchingSubstring: true)
+                try await settle(host)
+                let metadata = authored ? "2 Active Comments" : "First Review"
+                let actionsY = rect(try text(metadata, in: capture(host)), in: host).midY
+                try exportPreview(capture(host), name: "archive-action-\(dark ? "dark" : "light")-\(authored ? "authored" : followed ? "followed" : "assigned")")
+                let archivePoint = NSPoint(x: host.bounds.maxX - (authored ? 73 : 129), y: actionsY)
+                try assertWhiteActionIcon(at: archivePoint, in: host)
+                try press(at: archivePoint, in: host)
+                try await settle(host)
+                XCTAssertNil(fixture.store.archiveErrorMessage)
+                XCTAssertTrue(fixture.store.activePullRequests.isEmpty)
+                XCTAssertEqual(fixture.store.archivedPullRequests, [request])
+                XCTAssertEqual(fixture.store.menuBarTitle, " 0")
+                XCTAssertTrue(openedURLs.isEmpty, "Archive must not fall through to a browser or assistant action.")
+                XCTAssertEqual(fixture.store.snapshot, snapshot)
+                try press("Archives", in: host, matchingSubstring: true)
+                try await settle(host)
+                try exportPreview(capture(host), name: "archives-\(dark ? "dark" : "light")-\(authored ? "authored" : followed ? "followed" : "assigned")")
+                let restoreY = rect(try text(metadata, in: capture(host)), in: host).midY
+                try press(at: NSPoint(x: 150, y: restoreY + (host.isFlipped ? 26 : -26)), in: host)
+                XCTAssertEqual(openedURLs, [request.url])
+                let restorePoint = NSPoint(x: host.bounds.maxX - 73, y: restoreY)
+                try assertWhiteActionIcon(at: restorePoint, in: host)
+                try press(at: restorePoint, in: host)
+                try await settle(host)
+                XCTAssertEqual(fixture.store.activePullRequests, [request])
+                XCTAssertTrue(fixture.store.archivedPullRequests.isEmpty)
+                XCTAssertEqual(fixture.store.menuBarTitle, followed || authored ? " 0" : " 1")
+                XCTAssertEqual(openedURLs, [request.url], "Restore must not invoke the row's browser action.")
+                XCTAssertFalse(fixture.store.changes.hasChanges)
+                let calls = await fixture.loader.calls
+                XCTAssertEqual(calls, 0)
+            }
+        }
+    }
+
+    func testArchivesRemainBelowAllOtherSectionsAndFitWithinTheDashboard() async throws {
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        var settings = ReviewConfiguration()
+        settings.sourceURLs = "https://dev.azure.com/example/Project"
+        settings.followPeople = true
+        settings.followedAuthorEmails = "alex@example.com"
+        settings.showAuthoredPullRequests = true
+        let archived = try archiveRequest(4)
+        var snapshot = ReviewSnapshot(pullRequests: [
+            try archiveRequest(1), try archiveRequest(2, followed: true),
+            try archiveRequest(3, authored: true), archived
+        ])
+        snapshot.identityScope = String(repeating: "a", count: 64)
+        try fixture.store.save(settings, verifiedSnapshot: snapshot)
+        fixture.store.archive(archived)
+        let app = AppDelegate(store: fixture.store, onboarding: fixture.model, updates: fixture.updates)
+        let host = NSHostingView(rootView: DashboardView(store: fixture.store, app: app)
+            .environment(\.colorScheme, .light)
+            .environment(\.locale, Locale(identifier: "en_US"))
+        )
+        let window = makeWindow(host)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 440, height: 540))
+        window.appearance = NSAppearance(named: .aqua)
+        try await settle(host)
+        let image = try capture(host)
+        try exportPreview(image, name: "archive-section-order")
+        let archive = try text("Archives", in: image, matchingSubstring: true)
+        let author = try text("I'm the Author", in: image, matchingSubstring: true)
+        let people = try text("People you follow", in: image, matchingSubstring: true)
+        let repository = try text("Service", in: image)
+        XCTAssertLessThan(archive.maxY, author.minY)
+        XCTAssertLessThan(author.maxY, people.minY)
+        XCTAssertLessThan(people.maxY, repository.minY)
+        XCTAssertGreaterThan(archive.minY, try text("By: Hritvik Patel", in: image).maxY)
+        XCTAssertEqual(host.bounds.size, NSSize(width: 440, height: 540))
+    }
+
+    private func archiveRequest(
+        _ number: Int, followed: Bool = false, authored: Bool = false
+    ) throws -> ReviewPullRequest {
+        ReviewPullRequest(
+            number: number, title: "Archive fixture \(number)", author: "Fixture author", organization: "example",
+            project: "Project", repository: "Service", repositoryID: "service-id",
+            createdAt: Date(timeIntervalSince1970: TimeInterval(number)),
+            url: try AzureDevOpsURL.make(
+                organization: "example", path: ["Project", "_git", "service-id", "pullrequest", String(number)]
+            ),
+            isRequired: false, isDraft: false, reviewStage: .firstReview, isFollowedOnly: followed,
+            authoredStatus: authored ? AuthoredPullRequestStatus(activeCommentCount: 2, hasRequiredApprovals: false) : nil
+        )
+    }
+
     func testRelaunchedDashboardShowsCachedRepositoriesAndUpdateTimeWhileRefreshing() async throws {
         let fixture = try OnboardingFixture()
         defer { fixture.close() }
@@ -366,7 +486,8 @@ final class OnboardingWindowTests: XCTestCase {
         _ = NSApplication.shared
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
-            styleMask: [.titled], backing: .buffered, defer: false
+            styleMask: [.titled], backing: .buffered, defer: false,
+            screen: NSScreen.screens.max { $0.backingScaleFactor < $1.backingScaleFactor }
         )
         window.isReleasedWhenClosed = false
         window.contentView = host
@@ -387,6 +508,28 @@ final class OnboardingWindowTests: XCTestCase {
         return try XCTUnwrap(bitmap.cgImage)
     }
 
+    private func assertWhiteActionIcon(
+        at point: NSPoint, in host: NSView, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let bounds = NSRect(x: point.x - 9, y: point.y - 9, width: 18, height: 18)
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: bounds))
+        host.cacheDisplay(in: bounds, to: bitmap)
+        var whitePixels = 0
+        var coloredPixels = 0
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let low = min(color.redComponent, color.greenComponent, color.blueComponent)
+                let high = max(color.redComponent, color.greenComponent, color.blueComponent)
+                if low > 0.75, high - low < 0.08 { whitePixels += 1 }
+                if high - low > 0.2 { coloredPixels += 1 }
+            }
+        }
+        let pixels = Double(bitmap.pixelsWide * bitmap.pixelsHigh)
+        XCTAssertGreaterThan(Double(whitePixels) / pixels, 0.4, "Action icons need a white backplate, including when inactive.", file: file, line: line)
+        XCTAssertGreaterThan(Double(coloredPixels) / pixels, 0.02, "The symbol must stay colored on white.", file: file, line: line)
+    }
+
     private func toolbarTargets(in host: NSView) throws -> [NSPoint] {
         let label = try text("Setup", in: capture(host))
         XCTAssertGreaterThan(label.minY, 0.8, "Setup belongs in the header, not the footer.")
@@ -403,7 +546,9 @@ final class OnboardingWindowTests: XCTestCase {
         ]
     }
 
-    private func text(_ title: String, in image: CGImage, matchingPrefix: Bool = false) throws -> CGRect {
+    private func text(
+        _ title: String, in image: CGImage, matchingPrefix: Bool = false, matchingSubstring: Bool = false
+    ) throws -> CGRect {
         let bandHeight = image.height / 5
         let height = CGFloat(bandHeight) / CGFloat(image.height)
         var regions: [(CGImage, CGFloat, CGFloat)] = [(image, 1, 0)]
@@ -431,7 +576,9 @@ final class OnboardingWindowTests: XCTestCase {
             let results = try XCTUnwrap(request.results)
             if let match = results.first(where: { observation in
                 observation.topCandidates(5).contains {
-                    matchingPrefix ? $0.string.lowercased().hasPrefix(title.lowercased()) : $0.string.lowercased() == title.lowercased()
+                    if matchingPrefix { return $0.string.lowercased().hasPrefix(title.lowercased()) }
+                    if matchingSubstring { return $0.string.lowercased().contains(title.lowercased()) }
+                    return $0.string.lowercased() == title.lowercased()
                 }
             }) {
                 bounds = CGRect(
@@ -440,7 +587,7 @@ final class OnboardingWindowTests: XCTestCase {
                 )
                 break
             }
-            visibleText = results.compactMap { $0.topCandidates(1).first?.string }
+            visibleText.append(contentsOf: results.compactMap { $0.topCandidates(1).first?.string })
         }
         return try XCTUnwrap(bounds, "Missing \(title); visible text: \(visibleText).")
     }
@@ -453,8 +600,8 @@ final class OnboardingWindowTests: XCTestCase {
         )
     }
 
-    private func press(_ title: String, in host: NSView) throws {
-        let bounds = try text(title, in: capture(host))
+    private func press(_ title: String, in host: NSView, matchingSubstring: Bool = false) throws {
+        let bounds = try text(title, in: capture(host), matchingSubstring: matchingSubstring)
         let button = rect(bounds, in: host)
         try press(at: NSPoint(x: button.midX, y: button.midY), in: host)
     }
