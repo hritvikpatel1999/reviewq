@@ -4,6 +4,7 @@ import Combine
 import OSLog
 import ReviewQCore
 import SwiftUI
+import UserNotifications
 
 @main
 enum ReviewQApp {
@@ -49,13 +50,15 @@ enum ReviewQApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate, ObservableObject {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate,
+                         UNUserNotificationCenterDelegate, ObservableObject {
     let store: ReviewStore
     let loginItem: LoginItemStore
     let diagnostics: DiagnosticsStore
     let menuShortcut: GlobalShortcutStore
     let onboarding: OnboardingStore
     let updates: UpdateStore
+    let reminders: ReminderStore
     @Published var actionError: String?
     @Published private(set) var isLaunchingReview = false
     private let reviewLauncher: any ReviewLaunching
@@ -71,17 +74,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     private var localPopoverMonitor: Any?
     private var globalPopoverMonitor: Any?
     private var subscriptions: Set<AnyCancellable> = []
+    private var pendingReminderActivation = false
     private let logger = Logger(subsystem: "dev.prbar.app", category: "application")
 
     init(
         store: ReviewStore = ReviewStore(), diagnostics: DiagnosticsStore = DiagnosticsStore(),
         reviewLauncher: any ReviewLaunching = ReviewLauncher(),
         shortcutRegistrar: (any GlobalShortcutRegistering)? = nil, onboarding: OnboardingStore? = nil,
-        updates: UpdateStore? = nil,
+        updates: UpdateStore? = nil, reminders: ReminderStore? = nil,
         popover: NSPopover = NSPopover(),
         openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) },
         terminateApplication: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) },
-        presentReviewError: @escaping @MainActor (ReviewLaunchError) -> Void = AppDelegate.showReviewError
+        presentReviewError: (@MainActor (ReviewLaunchError) -> Void)? = nil
     ) {
         self.store = store
         self.diagnostics = diagnostics
@@ -89,15 +93,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         self.openURL = openURL
         self.terminateApplication = terminateApplication
         self.popover = popover
-        self.onboarding = onboarding ?? OnboardingStore(store: store, diagnostics: diagnostics.logger)
+        let reminders = reminders ?? onboarding?.reminders ?? ReminderStore(
+            notifications: LocalReminderNotifications(), diagnostics: diagnostics.logger
+        )
+        self.reminders = reminders
+        self.onboarding = onboarding ?? OnboardingStore(
+            store: store, diagnostics: diagnostics.logger, reminders: reminders
+        )
         self.updates = updates ?? UpdateStore(diagnostics: diagnostics.logger)
-        self.presentReviewError = presentReviewError
+        self.presentReviewError = presentReviewError ?? { error in
+            Self.showReviewError(error, diagnostics: diagnostics.logger, openURL: openURL)
+        }
         menuShortcut = GlobalShortcutStore(
             registrar: shortcutRegistrar ?? CarbonShortcutRegistrar(diagnostics: diagnostics.logger),
             diagnostics: diagnostics.logger
         )
         loginItem = LoginItemStore(diagnostics: diagnostics.logger)
         super.init()
+        LocalReminderNotifications.center?.delegate = self
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -117,6 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         button.addSubview(menuBarChangeDot)
         button.target = self
         button.action = #selector(togglePopover)
+        for name in [NSWindow.didExposeNotification, NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            NotificationCenter.default.publisher(for: name, object: button.window)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.openReminderQueue() }
+                .store(in: &subscriptions)
+        }
         // Transient dismissal can close on mouse-down before the button's toggle on mouse-up.
         popover.behavior = .applicationDefined
         popover.animates = false
@@ -137,8 +156,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
                 self?.diagnostics.logger.log(.info, .wake)
                 self?.store.requestRefresh()
                 self?.updates.requestCheck()
+                self?.reminders.requestSynchronization()
             }
             .store(in: &subscriptions)
+        for name in [NSApplication.didBecomeActiveNotification, .NSSystemTimeZoneDidChange, .NSSystemClockDidChange] {
+            NotificationCenter.default.publisher(for: name)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in
+                    self?.reminders.requestSynchronization(force: notification.name != NSApplication.didBecomeActiveNotification)
+                }
+                .store(in: &subscriptions)
+        }
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.diagnostics.logger.log(.info, .sleep) }
@@ -147,20 +175,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
-                guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
-                    self?.logger.error("An application activation notification did not include its application.")
-                    return
-                }
-                self?.handleApplicationActivation(
-                    processIdentifier: application.processIdentifier, isActive: application.isActive
-                )
+                self?.handleApplicationActivation(notification)
             }
             .store(in: &subscriptions)
         updateStatusItem()
         startMenuShortcut()
         store.start()
         updates.requestCheck()
-        if CommandLine.arguments.contains("--diagnostics") {
+        reminders.requestSynchronization()
+        if pendingReminderActivation {
+            DispatchQueue.main.async { [weak self] in self?.openReminderQueue() }
+        } else if CommandLine.arguments.contains("--diagnostics") {
             showDiagnostics()
         } else if CommandLine.arguments.contains("--setup") || onboarding.shouldPresentAutomatically {
             showOnboarding()
@@ -174,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         diagnostics.logger.log(.info, .appReopened)
+        if pendingReminderActivation { return false }
         if onboarding.shouldPresentAutomatically {
             showOnboarding()
         } else {
@@ -183,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        pendingReminderActivation = false
         closePopover()
         onboarding.pause()
         updates.cancel()
@@ -193,6 +220,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
     }
 
+    func handleApplicationActivation(_ notification: Notification) {
+        guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            diagnostics.logger.log(.warning, .applicationActionFailed, operation: .application, reason: .invalidResponse)
+            logger.error("An application activation notification did not include its application.")
+            return
+        }
+        handleApplicationActivation(processIdentifier: application.processIdentifier, isActive: application.isActive)
+    }
+
     func handleApplicationActivation(processIdentifier: Int32, isActive: Bool) {
         guard isActive, processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
         closePopover()
@@ -200,6 +236,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     func startMenuShortcut() {
         menuShortcut.start { [weak self] in self?.togglePopover() }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
+    ) async {
+        let identifier = response.notification.request.identifier
+        let action = response.actionIdentifier
+        await handleReminderResponse(identifier: identifier, actionIdentifier: action)
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        guard notification.request.identifier.hasPrefix(ReminderNotification.identifierPrefix) else { return [] }
+        return [.banner, .list, .sound]
+    }
+
+    func handleReminderResponse(identifier: String, actionIdentifier: String) {
+        guard identifier.hasPrefix(ReminderNotification.identifierPrefix),
+              actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        diagnostics.logger.log(.info, .reminderOpened, operation: .reminders)
+        pendingReminderActivation = true
+        if statusItem != nil { openReminderQueue() }
+    }
+
+    private func openReminderQueue() {
+        guard pendingReminderActivation, let window = statusItem?.button?.window,
+              window.isVisible, !window.frame.isEmpty else { return }
+        pendingReminderActivation = false
+        showQueue()
+        store.requestRefresh()
+    }
+
+    func openNotificationSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"),
+              openURL(url) else {
+            reportActionFailure(
+                "Could not open notification settings. Open System Settings > Notifications and choose ReviewQ.",
+                operation: .reminders
+            )
+            return
+        }
+        actionError = nil
+        closePopover()
     }
 
     @objc private func togglePopover() {
@@ -420,16 +500,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
                 assistant, for: request.url,
                 additionalInstructions: assistant.additionalInstructions(in: store.configuration)
             )
-            let duration = start.duration(to: .now).components
             diagnostics.logger.log(
                 .info, .reviewLaunchFinished, operation: assistant.diagnosticOperation, requestID: requestID,
-                durationMilliseconds: Int(duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000)
+                durationMilliseconds: DiagnosticTiming.milliseconds(since: start)
             )
             closePopover()
         } catch is CancellationError {
             diagnostics.logger.log(
                 .info, .reviewLaunchFailed, operation: assistant.diagnosticOperation,
-                requestID: requestID, reason: .cancelled
+                requestID: requestID, reason: .cancelled,
+                durationMilliseconds: DiagnosticTiming.milliseconds(since: start)
             )
         } catch {
             let failure: ReviewLaunchError
@@ -447,7 +527,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             actionError = failure.localizedDescription
             diagnostics.logger.log(
                 .warning, .reviewLaunchFailed, operation: assistant.diagnosticOperation,
-                requestID: requestID, reason: failure.diagnosticReason
+                requestID: requestID, reason: failure.diagnosticReason,
+                durationMilliseconds: DiagnosticTiming.milliseconds(since: start),
+                systemCode: failure.diagnosticSystemCode ?? DiagnosticFailure(error).systemCode
             )
             logger.error("Review launch failed. Check ReviewQ Diagnostics.")
             closePopover()
@@ -464,23 +546,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             return
         }
         NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration()) {
-            [weak self] application, _ in
+            [weak self] application, error in
+            let succeeded = application != nil && error == nil
+            let failure = error.map(DiagnosticFailure.init)
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if application != nil {
-                    self.actionError = nil
-                    self.closePopover()
-                } else {
-                    self.reportActionFailure(
-                        "macOS could not open this PR in Edge. Check that Edge opens normally.",
-                        event: .browserOpenFailed, operation: .browser
-                    )
-                }
+                self?.handleEdgeOpen(succeeded: succeeded, failure: failure)
             }
         }
     }
 
-    private static func showReviewError(_ error: ReviewLaunchError) {
+    func handleEdgeOpen(succeeded: Bool, failure: DiagnosticFailure?) {
+        if succeeded {
+            actionError = nil
+            closePopover()
+        } else {
+            reportActionFailure(
+                "macOS could not open this PR in Edge. Check that Edge opens normally.",
+                event: .browserOpenFailed, operation: .browser,
+                reason: failure?.reason ?? .system, systemCode: failure?.systemCode
+            )
+        }
+    }
+
+    private static func showReviewError(
+        _ error: ReviewLaunchError, diagnostics: DiagnosticLogger, openURL: (URL) -> Bool
+    ) {
         NSApplication.shared.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Could not start review"
@@ -490,7 +580,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         alert.addButton(withTitle: "OK")
         if alert.runModal() == .alertFirstButtonReturn, error == .accessibilityRequired {
             guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
-                  NSWorkspace.shared.open(url) else {
+                  openURL(url) else {
+                diagnostics.log(.warning, .applicationActionFailed, operation: .scout, reason: .system)
                 let failure = NSAlert()
                 failure.messageText = "Open System Settings manually"
                 failure.informativeText = "Choose Privacy & Security > Accessibility and allow ReviewQ."
@@ -513,11 +604,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     private func reportActionFailure(
         _ message: String, event: DiagnosticEvent = .applicationActionFailed,
-        operation: DiagnosticOperation = .application, reason: DiagnosticReason = .system
+        operation: DiagnosticOperation = .application, reason: DiagnosticReason = .system, systemCode: Int? = nil
     ) {
         actionError = message
-        diagnostics.logger.log(.warning, event, operation: operation, reason: reason)
-        logger.error("App action failed. Check ReviewQ Diagnostics.")
+        diagnostics.logger.log(
+            reason == .cancelled ? .info : .warning, event, operation: operation, reason: reason, systemCode: systemCode
+        )
+        if reason != .cancelled { logger.error("App action failed. Check ReviewQ Diagnostics.") }
     }
 
     private func updateStatusItem() {

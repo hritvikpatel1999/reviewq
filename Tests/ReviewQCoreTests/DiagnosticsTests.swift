@@ -68,6 +68,47 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertNil(logger.error)
     }
 
+    func testNativeCodesAreCollectedWithoutPrivateDescriptionsAndCancellationIsNotAWarning() throws {
+        struct OpaqueFailure: LocalizedError {
+            var errorDescription: String? { "PRIVATE_NATIVE_DESCRIPTION" }
+        }
+        let logger = DiagnosticLogger(directory: directory)
+        logger.start()
+        let details: [String: Any] = [
+            NSLocalizedDescriptionKey: "PRIVATE_NATIVE_DESCRIPTION",
+            NSFilePathErrorKey: "/PRIVATE_NATIVE_PATH"
+        ]
+        logger.logFailure(
+            .loginItemFailed, error: NSError(domain: "SMAppServiceErrorDomain", code: 55, userInfo: details),
+            operation: .loginItem
+        )
+        logger.logFailure(
+            .browserOpenFailed, error: CocoaError(.fileReadNoPermission, userInfo: details), operation: .browser
+        )
+        logger.logFailure(.applicationActionFailed, error: POSIXError(.EACCES), operation: .application)
+        logger.logFailure(.applicationActionFailed, error: OpaqueFailure(), operation: .application)
+        logger.logFailure(
+            .applicationActionFailed, error: CocoaError(.userCancelled, userInfo: details), operation: .application
+        )
+        logger.flush()
+        let failures = try records().filter { $0.event != .startup }
+        XCTAssertEqual(failures.count, 4)
+        XCTAssertTrue(failures.allSatisfy { $0.level == .warning && $0.reason == .system })
+        XCTAssertEqual(failures.map(\.systemCode), [55, CocoaError.Code.fileReadNoPermission.rawValue, Int(EACCES), nil])
+        logger.setVerboseEnabled(true)
+        logger.logFailure(
+            .applicationActionFailed, error: CocoaError(.userCancelled, userInfo: details), operation: .application
+        )
+        logger.flush()
+        XCTAssertEqual(try records().filter { $0.event != .startup }.count, 4)
+        let cancelled = try XCTUnwrap(records("verbose.log").first { $0.reason == .cancelled })
+        XCTAssertEqual(cancelled.level, .info)
+        XCTAssertEqual(cancelled.systemCode, CocoaError.Code.userCancelled.rawValue)
+        let text = try logText()
+        XCTAssertFalse(text.contains("PRIVATE_NATIVE_DESCRIPTION"))
+        XCTAssertFalse(text.contains("PRIVATE_NATIVE_PATH"))
+    }
+
     func testVerboseOptOutStopsFutureOptionalCollectionButRetainsExistingEvents() throws {
         let logger = DiagnosticLogger(directory: directory)
         logger.start()
@@ -193,6 +234,13 @@ final class DiagnosticsTests: XCTestCase {
         let logger = DiagnosticLogger(directory: directory, verboseEnabled: true)
         logger.start()
         logger.logFailure(.refreshFailed, error: ReviewQError.network("private-source", "SECRET_SENTINEL"))
+        logger.logFailure(
+            .reminderSchedulingFailed,
+            error: ReminderError.schedulingFailed(DiagnosticFailure(
+                NSError(domain: "UNErrorDomain", code: 1, userInfo: [NSLocalizedDescriptionKey: "SECRET_SENTINEL"])
+            )),
+            operation: .reminders
+        )
         logger.flush()
         let url = directory.appendingPathComponent("warnings-errors.log")
         var objects = try Data(contentsOf: url).split(separator: 0x0a).map {
@@ -221,6 +269,12 @@ final class DiagnosticsTests: XCTestCase {
             XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("SECRET_SENTINEL"))
             XCTAssertEqual(try permissions(file), 0o600)
         }
+        let reminderFailure = try XCTUnwrap(decode(contents.appendingPathComponent("warnings-errors.log")).first {
+            $0.event == .reminderSchedulingFailed
+        })
+        XCTAssertEqual(reminderFailure.operation, .reminders)
+        XCTAssertEqual(reminderFailure.reason, .system)
+        XCTAssertEqual(reminderFailure.systemCode, 1)
         XCTAssertFalse(try logText().contains("SECRET_SENTINEL"))
     }
 

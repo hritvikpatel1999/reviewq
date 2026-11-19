@@ -3,6 +3,7 @@ import Carbon
 @testable import ReviewQ
 @testable import ReviewQCore
 import XCTest
+import UserNotifications
 
 @MainActor
 final class GlobalShortcutTests: XCTestCase {
@@ -62,8 +63,16 @@ final class GlobalShortcutTests: XCTestCase {
         XCTAssertTrue(store.errorMessage?.contains("could not be released") == true)
     }
 
-    func testForeignAndUnregisteredIdentifiersArePassedAlong() {
-        let registrar = CarbonShortcutRegistrar()
+    func testMalformedNativeEventsAreLoggedButForeignIdentifiersArePassedAlongSilently() throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ReviewQ-shortcut-diagnostics-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            do { try FileManager.default.removeItem(at: directory) }
+            catch { XCTFail("Could not remove the test-owned shortcut diagnostics directory.") }
+        }
+        let logger = DiagnosticLogger(directory: directory)
+        let registrar = CarbonShortcutRegistrar(diagnostics: logger)
         for identifier in [
             EventHotKeyID(signature: CarbonShortcutRegistrar.signature, id: 1),
             EventHotKeyID(signature: 0, id: 1),
@@ -71,6 +80,24 @@ final class GlobalShortcutTests: XCTestCase {
         ] {
             XCTAssertEqual(registrar.handle(identifier: identifier), OSStatus(eventNotHandledErr))
         }
+        var event: EventRef?
+        XCTAssertEqual(
+            CreateEvent(nil, OSType(kEventClassKeyboard), CarbonShortcutRegistrar.eventKind, 0, 0, &event), noErr
+        )
+        let malformed = try XCTUnwrap(event)
+        defer { ReleaseEvent(malformed) }
+        let status = registrar.handle(event: malformed)
+        XCTAssertNotEqual(status, noErr)
+        logger.flush()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try Data(contentsOf: directory.appendingPathComponent("warnings-errors.log"))
+            .split(separator: 0x0a).map { try decoder.decode(DiagnosticRecord.self, from: Data($0)) }
+        XCTAssertEqual(records.count, 1, "Only the malformed event, not expected foreign IDs, is a failure.")
+        XCTAssertEqual(records.first?.event, .shortcutHandlerFailed)
+        XCTAssertEqual(records.first?.operation, .shortcut)
+        XCTAssertEqual(records.first?.level, .warning)
+        XCTAssertEqual(records.first?.systemCode, Int(status))
     }
 
     func testStatusCountAndTooltipFollowArchiveAndRestoreWithoutRefreshingPRs() async throws {
@@ -113,6 +140,55 @@ final class GlobalShortcutTests: XCTestCase {
         }
         let calls = await fixture.loader.calls
         XCTAssertEqual(calls, 1, "Local archive changes must not refresh PRs.")
+    }
+
+    func testReminderResponsesOpenTheQueueAfterColdLaunchAndNeverToggleItClosedOrOpenSettings() async throws {
+        let application = NSApplication.shared
+        let previousPolicy = application.activationPolicy()
+        application.setActivationPolicy(.accessory)
+        defer { application.setActivationPolicy(previousPolicy) }
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        fixture.defaults.set(true, forKey: OnboardingStore.completedKey)
+        var configuration = ReviewConfiguration()
+        configuration.sourceURLs = "https://dev.azure.com/example/Project"
+        try fixture.store.save(configuration)
+        fixture.reminderCenter.status = .authorized
+        try fixture.reminders.save(ReminderConfiguration(isEnabled: true))
+        await fixture.reminders.waitUntilIdle()
+        let savedRequests = fixture.reminderCenter.pending
+        let popover = NSPopover()
+        let app = AppDelegate(
+            store: fixture.store, diagnostics: DiagnosticsStore(logger: .disabled, defaults: fixture.defaults),
+            shortcutRegistrar: ShortcutRegistrarFake(), onboarding: fixture.model, updates: fixture.updates,
+            popover: popover
+        )
+        defer {
+            app.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            XCTAssertEqual(fixture.reminderCenter.pending, savedRequests, "Quitting must leave scheduled OS reminders intact.")
+            popover.contentViewController = nil
+        }
+        app.handleReminderResponse(identifier: ReminderNotification.testIdentifier, actionIdentifier: UNNotificationDefaultActionIdentifier)
+        XCTAssertFalse(popover.isShown)
+        XCTAssertNil(app.statusItem)
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        try await showStatusItem(app)
+        await fixture.loader.waitUntilLoaded()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(popover.isShown, "A cold-launch response must wait for the status item, then open the queue.")
+        XCTAssertFalse(application.windows.contains { ["ReviewQ Settings", "ReviewQ Setup"].contains($0.title) && $0.isVisible })
+        XCTAssertNotNil(fixture.store.snapshot)
+        let cached = fixture.store.snapshot
+        for _ in 0..<2 {
+            app.handleReminderResponse(identifier: ReminderNotification.testIdentifier, actionIdentifier: UNNotificationDefaultActionIdentifier)
+            XCTAssertTrue(popover.isShown, "A notification must explicitly open, never toggle, an already-open queue.")
+            XCTAssertEqual(fixture.store.snapshot, cached, "Keep cached data visible while the normal refresh is requested.")
+        }
+        app.closePopover()
+        app.handleReminderResponse(identifier: "another.feature", actionIdentifier: UNNotificationDefaultActionIdentifier)
+        app.handleReminderResponse(identifier: ReminderNotification.testIdentifier, actionIdentifier: UNNotificationDismissActionIdentifier)
+        XCTAssertFalse(popover.isShown, "Unrelated notifications and dismissals must not activate ReviewQ.")
+        XCTAssertNil(app.actionError)
     }
 
     func testStatusClicksAndShortcutReleasesAlwaysToggleTheSamePopover() async throws {

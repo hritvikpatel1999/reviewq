@@ -5,6 +5,49 @@ import XCTest
 
 @MainActor
 final class OnboardingTests: XCTestCase {
+    func testReminderDraftsResumeWithoutSchedulingOrInvalidatingAVerifiedConnection() async throws {
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        await fixture.reach(.preferences)
+        let choices = ReminderConfiguration(
+            isEnabled: true, weekdays: [2, 6], times: [.init(hour: 9, minute: 45)], playsSound: true
+        )
+        fixture.model.reminderDraft = choices
+        XCTAssertTrue(fixture.model.hasVerifiedConnection)
+        await fixture.model.advance()
+        XCTAssertEqual(fixture.model.step, .ready)
+        XCTAssertEqual(fixture.checks.configurations.count, 1, "Local reminders must not repeat Azure DevOps queries.")
+        XCTAssertFalse(fixture.reminders.configuration.isEnabled)
+        XCTAssertNil(fixture.defaults.object(forKey: ReminderStore.settingsKey))
+        XCTAssertTrue(fixture.reminderCenter.pending.isEmpty)
+        fixture.model.pause()
+        let resumed = fixture.newModel()
+        XCTAssertEqual(resumed.reminderDraft, choices)
+        XCTAssertFalse(resumed.hasVerifiedConnection)
+        XCTAssertEqual(fixture.reminderCenter.permissionRequests, 0)
+        resumed.keepExistingSettings()
+        XCTAssertFalse(resumed.reminderDraft.isEnabled)
+        XCTAssertNil(fixture.defaults.object(forKey: ReminderStore.settingsKey))
+    }
+
+    func testDeniedRemindersSaveOnCompletionWithoutBlockingSetupOrRefetchingTheQueue() async throws {
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        await fixture.reach(.preferences)
+        fixture.reminderCenter.status = .denied
+        fixture.model.reminderDraft.isEnabled = true
+        await fixture.model.advance()
+        XCTAssertTrue(fixture.model.complete())
+        await fixture.reminders.waitUntilIdle()
+        XCTAssertTrue(fixture.reminders.configuration.isEnabled)
+        XCTAssertFalse(fixture.reminders.isScheduled)
+        XCTAssertTrue(try XCTUnwrap(fixture.reminders.errorMessage).contains("blocked"))
+        XCTAssertTrue(fixture.reminderCenter.pending.isEmpty)
+        XCTAssertEqual(fixture.reminderCenter.permissionRequests, 0)
+        XCTAssertTrue(fixture.defaults.bool(forKey: OnboardingStore.completedKey))
+        XCTAssertEqual(fixture.checks.configurations.count, 1)
+    }
+
     func testFreshSetupRequiresVerifiedAccessAndReusesTheQueueWithoutAnImmediateRefetch() async throws {
         let fixture = try OnboardingFixture()
         defer { fixture.close() }
@@ -279,17 +322,20 @@ final class OnboardingFixture {
     let updateClient = SetupUpdateClient()
     let updateClock = SetupUpdateClock()
     let updates: UpdateStore
+    let reminderCenter = SetupReminderCenter()
+    let reminders: ReminderStore
 
     init(checkConnection: OnboardingStore.ConnectionCheck? = nil) throws {
         defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         store = ReviewStore(defaults: defaults, keychain: keychain, loader: loader)
+        reminders = ReminderStore(notifications: reminderCenter, defaults: defaults)
         let clock = updateClock
         updates = UpdateStore(
             currentVersion: "3.1.1", defaults: defaults, client: updateClient, clock: { clock.now }
         )
         let checks = checks
         model = OnboardingStore(
-            store: store, defaults: defaults, keychain: keychain,
+            store: store, defaults: defaults, reminders: reminders, keychain: keychain,
             checkConnection: checkConnection ?? { configuration, token in try await checks.check(configuration, token) },
             companionStatus: Self.companions
         )
@@ -303,7 +349,7 @@ final class OnboardingFixture {
 
     func newModel() -> OnboardingStore {
         OnboardingStore(
-            store: store, defaults: defaults, keychain: keychain,
+            store: store, defaults: defaults, reminders: reminders, keychain: keychain,
             checkConnection: { [checks] configuration, token in try await checks.check(configuration, token) },
             companionStatus: Self.companions
         )
@@ -330,6 +376,26 @@ final class OnboardingFixture {
         updates.cancel()
         store.stop()
         defaults.removePersistentDomain(forName: suite)
+    }
+}
+
+@MainActor
+final class SetupReminderCenter: ReminderNotifying {
+    var isAvailable = true
+    var status = ReminderAuthorization.notDetermined
+    var permissionResult = ReminderAuthorization.authorized
+    var permissionRequests = 0
+    var pending: [String: ReminderNotification] = [:]
+    var additions = 0
+    func authorization() async -> ReminderAuthorization { status }
+    func requestAuthorization() async throws { permissionRequests += 1; status = permissionResult }
+    func pendingIdentifiers() async -> [String] { Array(pending.keys) }
+    func add(_ notification: ReminderNotification) async throws {
+        additions += 1
+        pending[notification.identifier] = notification
+    }
+    func removePending(identifiers: [String]) {
+        for identifier in identifiers { pending.removeValue(forKey: identifier) }
     }
 }
 

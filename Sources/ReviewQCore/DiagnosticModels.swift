@@ -26,6 +26,9 @@ public enum DiagnosticEvent: String, Codable, Sendable {
     case updateCheckStarted, updateCheckFinished, updateCheckFailed, updateCheckCancelled
     case updateCacheInvalidated, updateCacheWriteFailed
     case reviewArchived, reviewRestored, archiveChangeFailed, archiveStateInvalidated
+    case reminderSettingsSaved, reminderSettingsInvalidated, remindersScheduled, reminderTestRequested, reminderOpened, reminderFailed
+    case reminderAuthorizationFailed, reminderSchedulingFailed, reminderTestFailed
+    case shortcutHandlerFailed
 }
 
 public enum DiagnosticOperation: String, Codable, Sendable {
@@ -35,6 +38,7 @@ public enum DiagnosticOperation: String, Codable, Sendable {
     case shortcut
     case appUpdates
     case archives
+    case reminders
 }
 
 public enum DiagnosticReason: String, Codable, Sendable {
@@ -43,6 +47,7 @@ public enum DiagnosticReason: String, Codable, Sendable {
     case invalidConfiguration, corruptSettings, missingPAT, invalidPAT, keychain
     case cliUnavailable, cliFailure, invalidToken, system, storage, unsafePath
     case sizeLimit, retention, malformedRecord, approvalPending
+    case inputChanged, controlsUnavailable, submissionUnconfirmed
 }
 
 public struct DiagnosticFailure: Sendable {
@@ -61,6 +66,12 @@ public struct DiagnosticFailure: Sendable {
         } else if let error = error as? UpdateCheckError {
             reason = error.diagnosticReason
             if case .http(let code, _, _) = error { status = code }
+        } else if let error = error as? ReminderError {
+            if let underlying = error.underlyingDiagnostic {
+                self = underlying
+            } else {
+                reason = error.diagnosticReason
+            }
         } else if let error = error as? ReviewQError {
             switch error {
             case .noSources, .invalidSource, .duplicateSource, .invalidTenant, .reviewPromptTooLong, .invalidReviewPrompt,
@@ -96,8 +107,15 @@ public struct DiagnosticFailure: Sendable {
             }
         } else if let error = error as? DiagnosticStorageError {
             reason = error == .unsafePath ? .unsafePath : .storage
+        } else if let error = error as? CocoaError {
+            reason = error.code == .userCancelled ? .cancelled : .system
+            systemCode = error.code.rawValue
+        } else if let error = error as? POSIXError {
+            reason = .system
+            systemCode = Int(error.code.rawValue)
         } else {
             reason = .system
+            if type(of: error) is NSError.Type { systemCode = (error as NSError).code }
         }
     }
 
@@ -171,8 +189,8 @@ public enum DiagnosticStorageError: LocalizedError, Sendable {
     }
 }
 
-enum DiagnosticTiming {
-    static func milliseconds(since start: ContinuousClock.Instant) -> Int {
+public enum DiagnosticTiming {
+    public static func milliseconds(since start: ContinuousClock.Instant) -> Int {
         let components = start.duration(to: ContinuousClock.now).components
         return Int(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
     }

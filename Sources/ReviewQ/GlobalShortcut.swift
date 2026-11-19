@@ -92,13 +92,7 @@ final class CarbonShortcutRegistrar: GlobalShortcutRegistering {
                 guard let event, let userData else { return OSStatus(eventNotHandledErr) }
                 return MainActor.assumeIsolated {
                     let registrar = Unmanaged<CarbonShortcutRegistrar>.fromOpaque(userData).takeUnretainedValue()
-                    var identifier = EventHotKeyID()
-                    let status = GetEventParameter(
-                        event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
-                        nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier
-                    )
-                    guard status == noErr else { return status }
-                    return registrar.handle(identifier: identifier)
+                    return registrar.handle(event: event)
                 }
             },
             1, &event, Unmanaged.passUnretained(self).toOpaque(), &handler
@@ -119,6 +113,19 @@ final class CarbonShortcutRegistrar: GlobalShortcutRegistering {
             throw GlobalShortcutError(status: status)
         }
         self.action = action
+    }
+
+    func handle(event: EventRef) -> OSStatus {
+        var identifier = EventHotKeyID()
+        let status = GetEventParameter(
+            event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+            nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier
+        )
+        guard status == noErr else {
+            diagnostics.log(.warning, .shortcutHandlerFailed, operation: .shortcut, reason: .system, systemCode: Int(status))
+            return status
+        }
+        return handle(identifier: identifier)
     }
 
     func handle(identifier: EventHotKeyID) -> OSStatus {

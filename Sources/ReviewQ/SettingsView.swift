@@ -7,7 +7,9 @@ struct SettingsView: View {
     @ObservedObject var loginItem: LoginItemStore
     @ObservedObject var menuShortcut: GlobalShortcutStore
     @ObservedObject var updates: UpdateStore
+    @ObservedObject var reminders: ReminderStore
     @State private var draft: ReviewConfiguration
+    @State private var reminderDraft: ReminderConfiguration
     @State private var token = ""
     @State private var formError: String?
     @State private var didSave = false
@@ -19,7 +21,9 @@ struct SettingsView: View {
         self.loginItem = loginItem
         menuShortcut = app.menuShortcut
         updates = app.updates
+        reminders = app.reminders
         _draft = State(initialValue: store.configuration)
+        _reminderDraft = State(initialValue: app.reminders.configuration)
     }
 
     var body: some View {
@@ -41,6 +45,11 @@ struct SettingsView: View {
                     AuthoredPullRequestsSettings(isEnabled: $draft.showAuthoredPullRequests)
                     additionalInstructions
                     preferences
+                    ReminderSettings(
+                        configuration: $reminderDraft, reminders: reminders,
+                        saveHint: "Save and Refresh applies this schedule. Test notifications can be sent before saving.",
+                        openSystemSettings: app.openNotificationSettings
+                    )
                     startup
                     identityCache
                     UpdateSettings(updates: updates, open: app.open)
@@ -62,6 +71,10 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if let formError {
                         Text(formError).font(.caption).foregroundStyle(.red)
+                    } else if didSave, let error = reminders.errorMessage {
+                        Text("Settings saved. \(error)").font(.caption).foregroundStyle(.red)
+                    } else if didSave, reminders.isWorking {
+                        Text("Settings saved. Applying reminders...").font(.caption).foregroundStyle(.secondary)
                     } else if store.isRefreshing {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
@@ -75,12 +88,16 @@ struct SettingsView: View {
                 Button("Save and Refresh", action: save)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(promptValidationError != nil || followedPeopleValidationError != nil)
+                    .disabled(promptValidationError != nil || followedPeopleValidationError != nil || reminders.isWorking)
             }
             .padding(16)
         }
         .frame(minWidth: 520, minHeight: 540)
         .onChange(of: draft) { _, _ in
+            didSave = false
+            formError = nil
+        }
+        .onChange(of: reminderDraft) { _, _ in
             didSave = false
             formError = nil
         }
@@ -266,7 +283,13 @@ struct SettingsView: View {
 
     private func save() {
         do {
+            do { try reminderDraft.validate() }
+            catch {
+                app.diagnostics.logger.logFailure(.settingsFailed, error: error, operation: .reminders)
+                throw error
+            }
             try store.save(draft, newPAT: token)
+            try reminders.save(reminderDraft)
             token = ""
             formError = nil
             didSave = true

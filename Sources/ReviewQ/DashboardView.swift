@@ -6,6 +6,7 @@ struct DashboardView: View {
     @ObservedObject var store: ReviewStore
     @ObservedObject var app: AppDelegate
     @ObservedObject var updates: UpdateStore
+    @ObservedObject var reminders: ReminderStore
     @State private var expandedRepositoryIDs: Set<String> = []
     @State private var isFollowedPeopleExpanded = false
     @State private var isAuthoredExpanded = false
@@ -15,6 +16,7 @@ struct DashboardView: View {
         self.store = store
         self.app = app
         updates = app.updates
+        reminders = app.reminders
     }
 
     private var groups: [RepositoryGroup] {
@@ -57,6 +59,12 @@ struct DashboardView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if let error = app.actionError {
                 Text(error).font(.caption).foregroundStyle(.red)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
+            if let error = reminders.errorMessage {
+                Label(error, systemImage: "bell.slash")
+                    .font(.caption).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.bottom, 8)
             }
             Divider()
