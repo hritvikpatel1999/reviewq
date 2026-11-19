@@ -4,7 +4,7 @@
 
 A standalone native macOS menu-bar app for Azure DevOps pull requests that need your review.
 ReviewQ does not require SwiftBar, LeetBar, or AppFoundations at build time or runtime.
-Version 3 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
+Version 4 supports **Azure DevOps only**. GitHub pull-request integration is planned for a
 future version, not included in this release.
 
 ## Features
@@ -26,6 +26,7 @@ future version, not included in this release.
 - Automatic refresh (1, 5, 15, or 30 minutes; 15 by default), manual refresh, and refresh after wake.
 - Restore the last successful queue while a startup refresh loads fresh data for the same account.
 - A dismissible new-release banner with **View Updates** and a manual update check in Settings.
+- Opt-in scheduled local review reminders in Setup and Settings.
 - Microsoft Entra authentication through your existing Azure CLI sign-in.
 - Optional personal access token stored only in macOS Keychain.
 - Settings, optional draft PRs, and launch at login.
@@ -63,6 +64,52 @@ limits. Update notifications do not alter the green changes-since-refresh dots o
 Checks require a packaged app with a valid bundle version; `swift run` development builds may not
 include that metadata.
 
+## Scheduled review reminders
+
+In **Setup > Preferences** or **Settings > Review reminders**, enable **Enable review reminders**
+to choose days and times. Reminders are **off by default**, including for existing installations.
+The initial suggestion is Monday-Friday at **10:30 AM and 3:30 PM**, with **Play a sound** off.
+Add or remove times to choose the number of reminders per selected day; there is no separate,
+conflicting notifications-per-day setting. Up to **eight distinct times per selected day** are
+supported, producing at most 56 repeating weekly requests.
+
+Reminder edits stay in the current draft until **Save and Refresh** in Settings or **Open my queue**
+at the end of Setup. Closing Settings discards its unsaved reminder edits; paused Setup restores
+its draft without scheduling it. **Keep existing settings** also keeps the saved reminder schedule.
+Reminder-only setup edits do not invalidate the verified Azure DevOps connection or trigger extra
+PR queries.
+
+macOS permission is requested only after explicitly enabling reminders or choosing **Allow
+notifications**, never merely by launching ReviewQ or opening Setup/Settings. Permission approval
+does not save the draft or start reminders. If permission is denied, **Open Notifications settings**
+opens the macOS notification settings; Setup and ordinary queue use remain available. A saved
+opt-in remains blocked until macOS permits notifications, with a visible status rather than a
+claim that reminders are active. Returning to ReviewQ reconciles the saved schedule without
+re-prompting.
+
+**Send test notification** previews the selected sound setting immediately after permission has
+been granted, even before saving the schedule. It does not enable reminders or save other edits.
+Focus, notification style, and macOS settings may suppress a banner; check Notification Center.
+
+Reminders contain only **Review reminder / Take a moment to check your ReviewQ.** They include no
+PR counts, titles, author names, source URLs, or credentials, and are not conditional on whether
+the queue is empty. Scheduling and delivery make no Azure DevOps or backend calls. Clicking a
+reminder explicitly opens the menu-bar queue, waits for its status item on cold launch, and keeps
+an already-open queue open. Cached data stays visible while a normal, coalesced PR refresh runs.
+It does not route through the ordinary reopen-to-Settings action or discard a Settings/Setup draft.
+
+The OS owns the recurring local-calendar requests and can deliver them while ReviewQ is closed.
+They follow the Mac's local time zone rather than a pinned installation-time zone. macOS controls
+daylight-saving transitions and delivery during sleep or Focus; ReviewQ does not generate catch-up
+bursts. Saving a changed schedule replaces only ReviewQ reminder requests, and saving opt-out
+cancels them. Quitting the app does **not** cancel the saved reminders.
+
+Preferences are stored separately under `reviewReminders`, without account or PR data. Invalid
+saved reminder settings fail closed with a visible warning. Partial scheduling failures are rolled
+back, remain visible in Settings and the queue, and can be retried without altering the PR queues.
+This feature requires a packaged app; `swift run` and unit tests do not request real notification
+permission.
+
 ## First-run setup
 
 New installations open **ReviewQ Setup**: Welcome, review sources, Azure DevOps connection,
@@ -83,6 +130,8 @@ Existing configured installations continue straight to the menu bar without bein
   Allow All or change VS Code settings or organization policies.
 - Refresh defaults to 15 minutes; following people, authored PRs, drafts, and launch at login
   remain opt-in. Extra queue choices are checked before reaching the ready screen.
+- Scheduled review reminders are also opt-in in Preferences. Their permission and schedule are
+  independent of Azure DevOps; see [Scheduled review reminders](#scheduled-review-reminders).
 - **Open my queue** saves settings, stores a new PAT in Keychain, and opens the verified queue.
   A fresh snapshot is reused rather than immediately repeating its network refresh; a result older
   than the selected refresh interval triggers a normal refresh. Normal polling, manual refresh,
@@ -351,15 +400,37 @@ compiled-UUID, deployment-target, and checksum checks.
 
 The [version 3.2 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.2.0) remains available.
 
-## Download version 3.3
+## What's new in version 4
 
-Download from the [ReviewQ v3.3.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.3.0).
+Version **4.0.0 / build 11** adds opt-in scheduled review reminders and fuller failure diagnostics:
+
+- Choose weekdays, up to eight times per selected day, and optional sound in **Setup > Preferences**
+  or **Settings > Review reminders**. Reminders stay off unless you enable and save them.
+- Receive generic, local macOS notifications without PR data or additional Azure DevOps requests.
+  macOS can deliver the saved schedule while ReviewQ is closed.
+- Click a reminder to open the queue, including after a cold launch, without toggling an open queue
+  closed or redirecting to Settings. Permission, test-delivery, and retry controls stay explicit.
+- Diagnose reminder permission, scheduling, and test failures separately. Failures also retain
+  available macOS/CLI codes and assistant timings, without private descriptions or payloads.
+- Capture missing Settings validation and native callback failures even with verbose logging off.
+  Normal cancellation remains informational; editing a draft does not generate validation warnings.
+
+Existing credentials, queues, archives, caches, update checks, and menu-bar behavior are preserved.
+No new PR provider or automatic update installer is included. See
+[Scheduled review reminders](#scheduled-review-reminders) and the
+[release context](docs/pr-context/release-reviewq-v4.0.0.md) for behavior and validation details.
+
+The [version 3.3 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v3.3.0) remains available.
+
+## Download version 4
+
+Download from the [ReviewQ v4.0.0 release](https://github.com/hritvikpatel1999/reviewq/releases/tag/v4.0.0).
 The repository and release downloads are public; no GitHub sign-in is required.
 
 Requires **macOS 14 or later**:
 
-- **Apple Silicon** (M-series Macs): `ReviewQ-3.3.0-macos-arm64.zip`.
-- **Intel** Macs: `ReviewQ-3.3.0-macos-x86_64.zip`.
+- **Apple Silicon** (M-series Macs): `ReviewQ-4.0.0-macos-arm64.zip`.
+- **Intel** Macs: `ReviewQ-4.0.0-macos-x86_64.zip`.
 - `SHA256SUMS.txt` contains SHA-256 checksums for both ZIPs.
 
 If you download both ZIPs and the checksum file into the same folder, verify them with:
@@ -373,7 +444,7 @@ ReviewQ instance before opening it. The app has no Dock icon; use its pull-reque
 Configure Azure DevOps as described below. Azure CLI is installed separately if you choose that
 authentication method; a PAT does not require Azure CLI.
 
-**Signing limitation:** version 3.3 builds are ad-hoc signed for integrity, not Developer ID signed
+**Signing limitation:** version 4 builds are ad-hoc signed for integrity, not Developer ID signed
 or Apple-notarized. macOS may warn about or block downloaded copies. Do not disable Gatekeeper or
 other macOS security protections. Only use macOS's per-app approval if you have verified the
 download and trust it; otherwise build locally or wait for a Developer ID signed/notarized release.
@@ -424,7 +495,8 @@ window. Temporary menu-bar deactivation does not close the queue before the butt
 The default build uses the host architecture and outputs `dist/ReviewQ.app`. Quit the app before
 rebuilding that output. You can copy it to Applications before enabling launch at login.
 
-For development, `swift run ReviewQ` also works, but launch at login requires the app bundle.
+For development, `swift run ReviewQ` also works, but launch at login and scheduled reminders require
+the app bundle.
 
 Build one explicit architecture, or create both versioned ZIPs and checksums:
 
@@ -839,6 +911,13 @@ Verbose logging is opt-in and adds authentication, refresh, and HTTP request sta
 random session/refresh/request correlation IDs, HTTP status, monotonic duration, response byte
 counts, and page numbers. Refresh-start `count` means configured source lines; refresh-finish
 `count` means loaded PRs across all enabled queues; eviction `count`, when available, means discarded records.
+
+Failure diagnostics also cover authentication, settings and cache writes, updates, archives,
+launch-at-login registration, global-shortcut callbacks, browser/assistant launches, and reminders.
+Reminder permission, scheduling, and test-delivery failures have distinct events. Native macOS
+error codes and CLI exit codes are retained when available, without error descriptions or
+`NSError` payloads; assistant failures also retain elapsed time. These failures do not require
+verbose logging. Normal cancellation is informational, and passive form validation is not logged.
 
 Both files are owner-readable/writable only, capped at **5 MiB each / 10 MiB total**, with
 **seven-day retention** maintained at startup, on writes, and before export. Malformed records

@@ -63,9 +63,17 @@ enum ReviewLaunchError: LocalizedError, Equatable {
         case .appUnavailable, .unsupportedCopilotCLI: .cliUnavailable
         case .accessibilityRequired: .approvalPending
         case .scoutNotReady, .scoutInputTimedOut, .commandTimedOut: .timeout
+        case .scoutDraftChanged: .inputChanged
+        case .scoutControlUnavailable: .controlsUnavailable
+        case .submissionUnconfirmed: .submissionUnconfirmed
         case .commandFailed: .cliFailure
         default: .system
         }
+    }
+
+    var diagnosticSystemCode: Int? {
+        if case .commandFailed(let code) = self { return Int(code) }
+        return nil
     }
 }
 

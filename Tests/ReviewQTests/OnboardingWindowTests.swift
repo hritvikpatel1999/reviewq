@@ -7,6 +7,96 @@ import XCTest
 
 @MainActor
 final class OnboardingWindowTests: XCTestCase {
+    func testReminderControlsEditDaysAndTimesPreviewAndSaveWithoutApplyingDraftsInBothAppearances() async throws {
+        for dark in [false, true] {
+            let fixture = try OnboardingFixture()
+            defer { fixture.close() }
+            let host = NSHostingView(rootView: ReminderSettingsHarness(model: fixture.model, openSettings: {})
+                .environment(\.colorScheme, dark ? .dark : .light)
+                .environment(\.locale, Locale(identifier: "en_US"))
+            )
+            let window = makeWindow(host)
+            defer { window.close() }
+            window.setContentSize(NSSize(width: 560, height: 700))
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            try await settle(host)
+            try exportPreview(capture(host), name: "reminders-initial-\(dark ? "dark" : "light")")
+            XCTAssertFalse(fixture.model.reminderDraft.isEnabled)
+            XCTAssertEqual(fixture.reminderCenter.permissionRequests, 0)
+            try press("Enable review reminders", in: host)
+            try await settle(host)
+            await fixture.reminders.waitUntilIdle()
+            XCTAssertTrue(fixture.model.reminderDraft.isEnabled)
+            XCTAssertFalse(fixture.model.reminderDraft.playsSound)
+            XCTAssertEqual(fixture.reminderCenter.permissionRequests, 1)
+            XCTAssertTrue(fixture.reminderCenter.pending.isEmpty)
+            XCTAssertNil(fixture.defaults.object(forKey: ReminderStore.settingsKey))
+            let originalTimes = fixture.model.reminderDraft.times
+            try press("Add time", in: host, matchingSubstring: true)
+            try await settle(host)
+            XCTAssertEqual(fixture.model.reminderDraft.times.count, 3)
+            try exportPreview(capture(host), name: "reminders-three-times-\(dark ? "dark" : "light")")
+            let lastTime = rect(try text("Time 3", in: capture(host), matchingSubstring: true, topCandidateOnly: true), in: host)
+            try press(at: NSPoint(x: lastTime.minX + 255, y: lastTime.midY), in: host)
+            try await settle(host)
+            XCTAssertEqual(fixture.model.reminderDraft.times.count, 2, "Removing a time must keep the remaining DatePicker bindings valid.")
+            XCTAssertEqual(fixture.model.reminderDraft.times, originalTimes, "Removing the third row at \(lastTime) must preserve the first two times.")
+            try press("Sat", in: host)
+            try await settle(host)
+            XCTAssertTrue(fixture.model.reminderDraft.weekdays.contains(7))
+            try press("Send test", in: host, matchingSubstring: true)
+            try await settle(host)
+            await fixture.reminders.waitUntilIdle()
+            XCTAssertEqual(fixture.reminderCenter.pending.count, 1)
+            XCTAssertEqual(fixture.reminderCenter.pending.values.first?.trigger, .test)
+            XCTAssertFalse(fixture.reminders.configuration.isEnabled, "An explicit test must not save or enable the draft.")
+            try exportPreview(capture(host), name: "reminders-\(dark ? "dark" : "light")")
+            try press("Save reminders", in: host)
+            try await settle(host)
+            await fixture.reminders.waitUntilIdle()
+            XCTAssertEqual(fixture.reminders.configuration, fixture.model.reminderDraft)
+            XCTAssertEqual(fixture.reminderCenter.pending.values.filter {
+                if case .weekly = $0.trigger { return true }
+                return false
+            }.count, 12)
+            try press("Enable review reminders", in: host)
+            try await settle(host)
+            XCTAssertTrue(fixture.reminders.configuration.isEnabled, "Opt-out is also a draft until saved.")
+            try press("Save reminders", in: host)
+            try await settle(host)
+            await fixture.reminders.waitUntilIdle()
+            XCTAssertTrue(fixture.reminderCenter.pending.isEmpty)
+            XCTAssertFalse(fixture.reminders.configuration.isEnabled)
+        }
+    }
+
+    func testBlockedReminderPermissionKeepsSetupOptionalAndLinksToSystemSettings() async throws {
+        let fixture = try OnboardingFixture()
+        defer { fixture.close() }
+        fixture.reminderCenter.permissionResult = .denied
+        var settingsOpened = 0
+        let host = NSHostingView(rootView: ReminderSettingsHarness(
+            model: fixture.model, openSettings: { settingsOpened += 1 }
+        ).environment(\.locale, Locale(identifier: "en_US")))
+        let window = makeWindow(host)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 560, height: 700))
+        try await settle(host)
+        try press("Enable review reminders", in: host)
+        try await settle(host)
+        await fixture.reminders.waitUntilIdle()
+        _ = try text("You can still finish setup", in: capture(host), matchingSubstring: true)
+        try press("Open Notif", in: host, matchingSubstring: true)
+        XCTAssertEqual(settingsOpened, 1)
+        try press("Save reminders", in: host)
+        try await settle(host)
+        await fixture.reminders.waitUntilIdle()
+        XCTAssertTrue(fixture.reminders.configuration.isEnabled)
+        XCTAssertFalse(fixture.reminders.isScheduled)
+        XCTAssertTrue(fixture.reminderCenter.pending.isEmpty)
+        XCTAssertEqual(fixture.reminderCenter.permissionRequests, 1)
+    }
+
     func testSixPagesKeepNavigationVisibleAtMinimumAndDefaultSizesInBothAppearances() async throws {
         for dark in [false, true] {
             let fixture = try OnboardingFixture()
@@ -72,6 +162,7 @@ final class OnboardingWindowTests: XCTestCase {
         XCTAssertEqual(fixture.model.step, .companions)
         XCTAssertFalse(fixture.model.companions.scoutAccessibilityAllowed)
         XCTAssertEqual(fixture.checks.configurations.count, 1, "Assistant detection and navigation must not fetch Azure DevOps.")
+        XCTAssertEqual(fixture.reminderCenter.permissionRequests, 0, "Opening Setup alone must never request notification access.")
     }
 
     func testDashboardToolbarAndFooterPlacementPreserveActionsAndOpenSettings() async throws {
@@ -251,6 +342,94 @@ final class OnboardingWindowTests: XCTestCase {
         XCTAssertNotNil(try text("Could not check for ReviewQ updates.", in: capture(host), matchingPrefix: true))
         XCTAssertEqual(fixture.updates.availableUpdate, release)
         XCTAssertNil(fixture.store.snapshot, "Checking app updates must not fetch PRs.")
+    }
+
+    func testSettingsLogsInvalidReminderDraftOnlyOnSaveAndBeforeChangingSavedSettings() async throws {
+        let fixture = try OnboardingFixture()
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ReviewQ-settings-diagnostics-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            fixture.close()
+            do { try FileManager.default.removeItem(at: directory) }
+            catch { XCTFail("Could not remove the test-owned settings diagnostics directory.") }
+        }
+        var settings = ReviewConfiguration()
+        settings.sourceURLs = "https://dev.azure.com/example/Project"
+        try fixture.store.save(settings)
+        fixture.reminderCenter.status = .authorized
+        try fixture.reminders.save(.init(isEnabled: true, weekdays: [2], times: [.init(hour: 10, minute: 30)]))
+        await fixture.reminders.waitUntilIdle()
+        let savedSettings = fixture.defaults.data(forKey: ReviewStore.settingsKey)
+        let savedReminders = fixture.defaults.data(forKey: ReminderStore.settingsKey)
+        let logger = DiagnosticLogger(directory: directory)
+        logger.start()
+        let app = AppDelegate(
+            store: fixture.store, diagnostics: DiagnosticsStore(logger: logger, defaults: fixture.defaults),
+            onboarding: fixture.model, updates: fixture.updates
+        )
+        let host = NSHostingView(rootView: SettingsView(store: fixture.store, app: app, loginItem: app.loginItem)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light)
+            .environment(\.locale, Locale(identifier: "en_US"))
+        )
+        let window = makeWindow(host)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 560, height: 700))
+        window.appearance = NSAppearance(named: .aqua)
+        try await settle(host)
+        var views = [host as NSView]
+        var scroller: NSScrollView?
+        while let view = views.popLast() {
+            if let scroll = view as? NSScrollView,
+               let document = scroll.documentView, document.bounds.height > scroll.bounds.height {
+                scroller = scroll
+                break
+            }
+            views.append(contentsOf: view.subviews.reversed())
+        }
+        let scroll = try XCTUnwrap(scroller)
+        let document = try XCTUnwrap(scroll.documentView)
+        let maximum = max(0, document.bounds.height - scroll.contentView.bounds.height)
+        var found = false
+        for offset in stride(from: CGFloat(0), through: maximum + 250, by: 250) {
+            let position = min(offset, maximum)
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: document.isFlipped ? position : maximum - position))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try await settle(host)
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .fast
+            request.recognitionLanguages = ["en-US"]
+            try VNImageRequestHandler(cgImage: capture(host)).perform([request])
+            let labels = try XCTUnwrap(request.results).flatMap { $0.topCandidates(5).map { $0.string.lowercased() } }
+            if labels.contains("mon"), labels.contains(where: { $0.contains("review reminders") }) {
+                found = true
+                break
+            }
+        }
+        XCTAssertTrue(found, "The Settings reminder controls must be reachable by scrolling.")
+        guard found else { return }
+        try press("Mon", in: host)
+        try await settle(host)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        func records() throws -> [DiagnosticRecord] {
+            logger.flush()
+            return try Data(contentsOf: directory.appendingPathComponent("warnings-errors.log"))
+                .split(separator: 0x0a).map { try decoder.decode(DiagnosticRecord.self, from: Data($0)) }
+        }
+        XCTAssertEqual(try records().map(\.event), [.startup], "Passive draft validation must not emit warnings.")
+        try press("Save and Refresh", in: host)
+        try await settle(host)
+        let failures = try records().filter { $0.event != .startup }
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first?.event, .settingsFailed)
+        XCTAssertEqual(failures.first?.operation, .reminders)
+        XCTAssertEqual(failures.first?.reason, .invalidConfiguration)
+        XCTAssertEqual(fixture.defaults.data(forKey: ReviewStore.settingsKey), savedSettings)
+        XCTAssertEqual(fixture.defaults.data(forKey: ReminderStore.settingsKey), savedReminders)
+        let calls = await fixture.loader.calls
+        XCTAssertEqual(calls, 0)
     }
 
     func testNativeArchiveAndRestoreMoveCardsOutOfEveryActiveQueueInBothAppearances() async throws {
@@ -547,7 +726,8 @@ final class OnboardingWindowTests: XCTestCase {
     }
 
     private func text(
-        _ title: String, in image: CGImage, matchingPrefix: Bool = false, matchingSubstring: Bool = false
+        _ title: String, in image: CGImage, matchingPrefix: Bool = false, matchingSubstring: Bool = false,
+        topCandidateOnly: Bool = false
     ) throws -> CGRect {
         let bandHeight = image.height / 5
         let height = CGFloat(bandHeight) / CGFloat(image.height)
@@ -575,7 +755,7 @@ final class OnboardingWindowTests: XCTestCase {
             try VNImageRequestHandler(cgImage: region).perform([request])
             let results = try XCTUnwrap(request.results)
             if let match = results.first(where: { observation in
-                observation.topCandidates(5).contains {
+                observation.topCandidates(topCandidateOnly ? 1 : 5).contains {
                     if matchingPrefix { return $0.string.lowercased().hasPrefix(title.lowercased()) }
                     if matchingSubstring { return $0.string.lowercased().contains(title.lowercased()) }
                     return $0.string.lowercased() == title.lowercased()
@@ -631,6 +811,27 @@ final class OnboardingWindowTests: XCTestCase {
             ["ReviewQ Setup", "ReviewQ Settings", "ReviewQ Diagnostics"].contains(window.title) {
             window.close()
         }
+    }
+}
+
+private struct ReminderSettingsHarness: View {
+    @ObservedObject var model: OnboardingStore
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            ReminderSettings(
+                configuration: $model.reminderDraft, reminders: model.reminders,
+                saveHint: "Your schedule is saved when you finish setup.", openSystemSettings: openSettings
+            )
+            Button("Save reminders") {
+                do { try model.reminders.save(model.reminderDraft) }
+                catch { XCTFail("Could not save reminder draft: \(error)") }
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 

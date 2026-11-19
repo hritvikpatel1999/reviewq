@@ -232,6 +232,47 @@ final class ReviewLauncherTests: XCTestCase {
         XCTAssertEqual(started.requestID, failed.requestID)
         XCTAssertEqual(failed.operation, .scout)
         XCTAssertEqual(failed.reason, .approvalPending)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(failed.durationMilliseconds), 0)
+    }
+
+    func testCommandExitCodesAndScoutFailureStagesSurviveDefaultOnDiagnostics() async throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ReviewQ-launch-failure-tests-\(UUID())")
+        let setup = try OnboardingFixture()
+        defer { setup.close(); cleanup(directory) }
+        let logger = DiagnosticLogger(directory: directory)
+        let cases: [(ReviewAssistant, any Error, DiagnosticReason, Int?)] = [
+            (.copilot, LocalCommandError.failed(23), .cliFailure, 23),
+            (.scout, ReviewLaunchError.scoutDraftChanged, .inputChanged, nil),
+            (.scout, ReviewLaunchError.scoutControlUnavailable, .controlsUnavailable, nil),
+            (.scout, ReviewLaunchError.submissionUnconfirmed, .submissionUnconfirmed, nil)
+        ]
+        let request = try fixture()
+        for (assistant, error, _, _) in cases {
+            let app = AppDelegate(
+                store: setup.store, diagnostics: DiagnosticsStore(logger: logger, defaults: setup.defaults),
+                reviewLauncher: StubReviewLauncher(error: error), onboarding: setup.model, updates: setup.updates,
+                presentReviewError: { _ in }
+            )
+            await app.review(request, with: assistant)
+            XCTAssertNotNil(app.actionError)
+            XCTAssertFalse(app.isLaunchingReview)
+        }
+        logger.flush()
+        let data = try Data(contentsOf: directory.appendingPathComponent("warnings-errors.log"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try data.split(separator: 0x0a).map { try decoder.decode(DiagnosticRecord.self, from: Data($0)) }
+        XCTAssertEqual(records.count, cases.count)
+        XCTAssertEqual(records.map(\.reason), cases.map { $0.2 })
+        XCTAssertEqual(records.map(\.systemCode), cases.map { $0.3 })
+        XCTAssertEqual(records.map(\.operation), [.copilot, .scout, .scout, .scout])
+        XCTAssertTrue(records.allSatisfy {
+            $0.event == .reviewLaunchFailed && $0.level == .warning && $0.requestID != nil && $0.durationMilliseconds != nil
+        })
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.contains(request.url.absoluteString))
+        XCTAssertFalse(text.contains(request.title))
     }
 
     func testSuccessfulLaunchClearsAnOldErrorAndDoesNotPresentAnAlert() async throws {

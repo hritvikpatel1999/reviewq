@@ -70,6 +70,14 @@ final class OnboardingStore: ObservableObject {
             if token != oldValue { invalidateConnection(); errorMessage = nil }
         }
     }
+    @Published var reminderDraft: ReminderConfiguration {
+        didSet {
+            guard reminderDraft != oldValue else { return }
+            errorMessage = nil
+            persistProgress()
+        }
+    }
+    let reminders: ReminderStore
     @Published private(set) var step: OnboardingStep = .welcome {
         didSet { persistProgress() }
     }
@@ -91,12 +99,18 @@ final class OnboardingStore: ObservableObject {
 
     init(
         store: ReviewStore, defaults: UserDefaults = .standard, diagnostics: DiagnosticLogger = .disabled,
+        reminders: ReminderStore? = nil,
         keychain: any PATStoring = KeychainPATStore(), checkConnection: ConnectionCheck? = nil,
         companionStatus: @escaping @MainActor () -> ReviewCompanionStatus = ReviewCompanionStatus.current
     ) {
         self.store = store
         self.defaults = defaults
         self.diagnostics = diagnostics
+        let reminders = reminders ?? ReminderStore(
+            notifications: LocalReminderNotifications(), defaults: defaults, diagnostics: diagnostics
+        )
+        self.reminders = reminders
+        reminderDraft = reminders.configuration
         self.companionStatus = companionStatus
         companions = companionStatus()
         draft = store.configuration
@@ -110,7 +124,10 @@ final class OnboardingStore: ObservableObject {
             do {
                 guard let data = defaults.data(forKey: Self.progressKey) else { throw SetupError.corruptProgress }
                 let progress = try JSONDecoder().decode(Progress.self, from: data)
+                let reminderChoices = progress.reminders ?? reminders.configuration
+                try reminderChoices.validate()
                 draft = progress.configuration
+                reminderDraft = reminderChoices
                 step = progress.step.rawValue > OnboardingStep.authentication.rawValue ? .authentication : progress.step
                 isActive = true
                 infoMessage = "Your setup choices were restored. Test your connection again; unsaved PATs must be entered again."
@@ -145,6 +162,7 @@ final class OnboardingStore: ObservableObject {
     func begin() {
         if !isActive {
             draft = store.configuration
+            reminderDraft = reminders.configuration
             step = .welcome
             infoMessage = nil
             invalidateConnection()
@@ -179,6 +197,7 @@ final class OnboardingStore: ObservableObject {
                 refreshCompanions()
             case .companions: step = .preferences
             case .preferences:
+                try reminderDraft.validate()
                 _ = try draft.validatedSources()
                 if !hasVerifiedConnection { await testConnection() }
                 guard hasVerifiedConnection else { return }
@@ -246,7 +265,9 @@ final class OnboardingStore: ObservableObject {
     func complete() -> Bool {
         do {
             guard step == .ready, hasVerifiedConnection, let snapshot else { throw SetupError.connectionRequired }
+            try reminderDraft.validate()
             try store.save(draft, newPAT: token, verifiedSnapshot: snapshot)
+            try reminders.save(reminderDraft)
             defaults.set(true, forKey: Self.completedKey)
             isActive = false
             defaults.removeObject(forKey: Self.progressKey)
@@ -269,6 +290,7 @@ final class OnboardingStore: ObservableObject {
         isActive = false
         defaults.removeObject(forKey: Self.progressKey)
         draft = store.configuration
+        reminderDraft = reminders.configuration
         step = .welcome
         errorMessage = nil
         infoMessage = nil
@@ -294,7 +316,9 @@ final class OnboardingStore: ObservableObject {
     private func persistProgress() {
         guard isActive else { return }
         do {
-            defaults.set(try JSONEncoder().encode(Progress(step: step, configuration: draft)), forKey: Self.progressKey)
+            defaults.set(try JSONEncoder().encode(Progress(
+                step: step, configuration: draft, reminders: reminderDraft
+            )), forKey: Self.progressKey)
         } catch { report(error, event: .settingsFailed) }
     }
 
@@ -306,6 +330,7 @@ final class OnboardingStore: ObservableObject {
     private struct Progress: Codable {
         let step: OnboardingStep
         let configuration: ReviewConfiguration
+        let reminders: ReminderConfiguration?
     }
 
     private struct AccountInput: Equatable {

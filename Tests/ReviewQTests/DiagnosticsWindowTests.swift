@@ -100,6 +100,43 @@ final class DiagnosticsWindowTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: "diagnosticsSessionActive"))
     }
 
+    func testNativeActivationAndBrowserFailuresReachDefaultDiagnosticsWithoutPrivateDetails() throws {
+        let (logger, diagnostics, defaults, directory, suite) = try fixture()
+        let setup = try OnboardingFixture()
+        defer {
+            setup.close()
+            defaults.removePersistentDomain(forName: suite)
+            cleanup(directory)
+        }
+        let app = AppDelegate(
+            store: setup.store, diagnostics: diagnostics, onboarding: setup.model, updates: setup.updates
+        )
+        app.handleApplicationActivation(Notification(
+            name: NSWorkspace.didActivateApplicationNotification,
+            userInfo: [NSWorkspace.applicationUserInfoKey: "PRIVATE_ACTIVATION_PAYLOAD"]
+        ))
+        app.handleEdgeOpen(succeeded: false, failure: DiagnosticFailure(NSError(
+            domain: NSOSStatusErrorDomain, code: -10810,
+            userInfo: [NSLocalizedDescriptionKey: "PRIVATE_BROWSER_ERROR"]
+        )))
+        XCTAssertTrue(try XCTUnwrap(app.actionError).contains("could not open this PR in Edge"))
+        app.handleEdgeOpen(succeeded: false, failure: DiagnosticFailure(CocoaError(.userCancelled)))
+        logger.flush()
+        let data = try Data(contentsOf: directory.appendingPathComponent("warnings-errors.log"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = try data.split(separator: 0x0a).map { try decoder.decode(DiagnosticRecord.self, from: Data($0)) }
+        XCTAssertEqual(records.map(\.event), [.applicationActionFailed, .browserOpenFailed])
+        XCTAssertEqual(records.first?.operation, .application)
+        XCTAssertEqual(records.first?.reason, .invalidResponse)
+        XCTAssertEqual(records.last?.operation, .browser)
+        XCTAssertEqual(records.last?.systemCode, -10810)
+        XCTAssertTrue(records.allSatisfy { $0.level == .warning })
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.contains("PRIVATE_ACTIVATION_PAYLOAD"))
+        XCTAssertFalse(text.contains("PRIVATE_BROWSER_ERROR"))
+    }
+
     private func fixture() throws -> (DiagnosticLogger, DiagnosticsStore, UserDefaults, URL, String) {
         let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("ReviewQ-diagnostics-ui-tests-\(UUID())")

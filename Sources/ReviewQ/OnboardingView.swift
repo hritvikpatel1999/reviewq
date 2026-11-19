@@ -6,12 +6,14 @@ struct OnboardingView: View {
     @ObservedObject var app: AppDelegate
     @ObservedObject private var loginItem: LoginItemStore
     @ObservedObject private var menuShortcut: GlobalShortcutStore
+    @ObservedObject private var reminders: ReminderStore
 
     init(model: OnboardingStore, app: AppDelegate) {
         self.model = model
         self.app = app
         loginItem = app.loginItem
         menuShortcut = app.menuShortcut
+        reminders = model.reminders
     }
 
     var body: some View {
@@ -289,6 +291,11 @@ struct OnboardingView: View {
             if let error = loginItem.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red)
             }
+            ReminderSettings(
+                configuration: $model.reminderDraft, reminders: reminders,
+                saveHint: "Your schedule is saved when you choose Open my queue.",
+                openSystemSettings: app.openNotificationSettings
+            )
         }
         .disabled(model.isChecking)
     }
@@ -378,7 +385,7 @@ struct OnboardingView: View {
             }
             .buttonStyle(.borderedProminent).controlSize(.large)
             .keyboardShortcut(.defaultAction)
-            .disabled(!model.canContinue || loginItem.isWorking)
+            .disabled(!model.canContinue || loginItem.isWorking || reminders.isWorking)
             .accessibilityIdentifier("setup-continue")
         }
     }

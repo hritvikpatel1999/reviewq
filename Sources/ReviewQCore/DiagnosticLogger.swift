@@ -243,7 +243,12 @@ public final class DiagnosticLogger: @unchecked Sendable {
 
     private func reportFailure(_ error: any Error) {
         failure = error as? DiagnosticStorageError ?? .unavailable
-        systemLogger.error("Local diagnostics are unavailable. Open ReviewQ Diagnostics to retry.")
+        let issue = DiagnosticFailure(error)
+        if let code = issue.systemCode {
+            systemLogger.error("Local diagnostics are unavailable (\(issue.reason.rawValue, privacy: .public), code \(code, privacy: .public)). Open ReviewQ Diagnostics to retry.")
+        } else {
+            systemLogger.error("Local diagnostics are unavailable (\(issue.reason.rawValue, privacy: .public)). Open ReviewQ Diagnostics to retry.")
+        }
     }
 
     private func validateNode(
